@@ -1,0 +1,57 @@
+use chrono::{DateTime, Utc};
+
+#[derive(Debug)]
+pub struct GameData {
+    pub event_start_time: DateTime<Utc>,
+    pub original_start_time: Option<DateTime<Utc>>,
+    pub match_id: String,
+    pub set_number: i32,
+    pub leg_number: i32,
+    pub competition_type: String,
+    pub season: String,
+    pub division: String,
+    pub venue: String,
+    pub home_team_name: String,
+    pub home_team_club: String,
+    pub away_team_name: String,
+    pub away_team_club: String,
+    pub home_player1: String,
+    pub home_player2: Option<String>,
+    pub away_player1: String,
+    pub away_player2: Option<String>,
+    pub home_score: i32,
+    pub away_score: i32,
+    pub handicap_home: i32,
+    pub handicap_away: i32,
+}
+
+#[derive(Debug)]
+pub struct Players {
+    pub home_player1: String,
+    pub home_player2: Option<String>,
+    pub away_player1: String,
+    pub away_player2: Option<String>,
+}
+
+pub enum MatchType {
+    MkttlLeagueMatch,
+    MkttlChallengeCup,
+}
+
+pub const KNOWN_CLUBS: &[&str] = &[
+    "Chackmore",
+    "Great Brickhill",
+    "Greenleys",
+    "Leighton Buzzard",
+    "Little Horwood",
+    "Milton Keynes",
+    "Mursley",
+    "Newport Pagnell",
+    "Open University",
+    "Padbury Sports Pavilion",
+    "Padbury",
+    "Shenley Wood",
+    "Stony Stratford Cricket Club",
+    "Stony Stratford Lawn Tennis Club",
+    "Woburn Sands",
+]; 

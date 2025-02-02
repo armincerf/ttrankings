@@ -1,0 +1,5 @@
+[workspace]
+resolver = "2"
+members = [
+    "scrapers/mkttl_match_card_scraper"
+]
