@@ -15,7 +15,7 @@ use governor::{
     state::{InMemoryState, NotKeyed},
     Quota, RateLimiter,
 };
-use questdb::ingress::{Buffer, Sender, TimestampNanos};
+use questdb::ingress::{Buffer, Sender, TimestampNanos, TableName, ColumnName};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
@@ -28,6 +28,7 @@ use std::{
 use tokio::signal;
 use tracing::{error, info};
 use urlencoding;
+use tokio::sync::Semaphore;
 
 use config::ScraperConfig;
 use match_html_scraper::MatchHtmlScraper;
@@ -39,6 +40,7 @@ const EVENT_LOG_BASE_URL: &str = "https://www.mkttl.co.uk/event-viewer/load.js";
 const FULL_SCRAPE_PAGE_SIZE: u32 = 500;
 const MAX_RETRIES: u32 = 3;
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
+const MAX_CONCURRENT_FETCHES: usize = 5;  // Maximum number of concurrent match card fetches
 
 #[derive(Debug, Deserialize, Clone)]
 struct EventLogResponse {
@@ -196,8 +198,22 @@ impl Scraper {
             .build()
             .context("Failed to create HTTP client")?;
 
-        let quest_sender = Sender::from_conf(&config.get_questdb_url())
+        info!("Attempting to connect to QuestDB ILP endpoint at localhost:9000");
+        let mut quest_sender = Sender::from_conf("http::addr=localhost:9000/write?precision=n;")
             .context("Failed to create QuestDB sender")?;
+
+        // Test the connection by sending a small test message
+        {
+            info!("Testing QuestDB connection with test message");
+            let mut buffer = Buffer::new();
+            buffer
+                .table("mkttl_matches")?
+                .symbol("test", "test")?
+                .at(TimestampNanos::now())?;
+
+            quest_sender.flush(&mut buffer).context("Failed to send test message to QuestDB. Please ensure QuestDB is running and the ILP endpoint is accessible at localhost:9000")?;
+            info!("Successfully connected to QuestDB ILP endpoint");
+        }
 
         let seen_urls = HashSet::new();
 
@@ -215,6 +231,7 @@ impl Scraper {
             total_pages: 0,
             total_results: 0,
             status: "Initializing".to_string(),
+            current_url: None,
             metrics: None,
         }));
 
@@ -270,6 +287,13 @@ impl Scraper {
 
     async fn fetch_match_html(&self, url: &str) -> Result<String> {
         info!("Fetching HTML for match URL: {}", url);
+        
+        // Update stats with current URL
+        {
+            let mut stats = self.stats.lock().unwrap();
+            stats.current_url = Some(url.to_string());
+            stats.status = format!("Fetching match card from {}", url);
+        }
 
         Self::retry_with_backoff(|| async {
             let response = self.client.get(url).send().await?;
@@ -316,7 +340,8 @@ impl Scraper {
         {
             let mut stats = self.stats.lock().unwrap();
             stats.current_page = page;
-            stats.status = format!("Fetching page {}", page);
+            stats.current_url = None;
+            stats.status = format!("Fetching DataTables page {} ({} records per page)", page, page_length);
             stats.metrics = Some(self.metrics.get_metrics());
         }
 
@@ -357,7 +382,12 @@ impl Scraper {
         .await;
 
         match &response {
-            Ok(_) => tracker.finish(true),
+            Ok(_) => {
+                tracker.finish(true);
+                // Update stats with success
+                let mut stats = self.stats.lock().unwrap();
+                stats.status = format!("Successfully loaded page {} ({} records)", page, page_length);
+            }
             Err(e) => {
                 tracker.finish(false);
                 self.metrics.record_error(e.to_string());
@@ -415,37 +445,103 @@ impl Scraper {
         }
 
         info!("Processing {} match events in bulk", events.len());
+        {
+            let mut stats = self.stats.lock().unwrap();
+            stats.status = format!("Processing batch of {} match events", events.len());
+        }
+
         let mut buffer = Buffer::new();
         let mut successful_events = 0;
 
+        // Create table and column names once
+        let table_name = TableName::new("mkttl_matches")?;
+        let updated_by_name = ColumnName::new("updated_by")?;
+        let url_name = ColumnName::new("url")?;
+        let raw_html_name = ColumnName::new("raw_html")?;
+        let fetched_at_name = ColumnName::new("fetched_at")?;
+
+        // Create a semaphore to limit concurrent requests
+        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES));
+        let mut handles = Vec::new();
+
+        // Start all fetch operations
         for event in events {
-            // Fetch HTML for the match URL
-            match self.fetch_match_html(&event.url).await {
-                Ok(html) => {
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let client = self.client.clone();
+            let stats = self.stats.clone();
+            
+            let handle = tokio::spawn(async move {
+                let _permit = permit; // Keep permit alive for the duration of this task
+                
+                // Update stats to show we're fetching this URL
+                {
+                    let mut stats = stats.lock().unwrap();
+                    stats.current_url = Some(event.url.clone());
+                    stats.status = format!("Fetching match card from {}", event.url);
+                }
+
+                let result = Self::retry_with_backoff(|| async {
+                    let response = client.get(&event.url).send().await?;
+
+                    if !response.status().is_success() {
+                        anyhow::bail!("Failed to fetch HTML: HTTP {}", response.status());
+                    }
+
+                    let html = response.text().await?;
+                    
+                    // Validate HTML
+                    if !Self::validate_html(&html) {
+                        anyhow::bail!("Invalid HTML - missing games div");
+                    }
+
+                    Ok((event.clone(), html))
+                }).await;
+
+                result
+            });
+            handles.push(handle);
+        }
+
+        // Process results as they complete
+        for handle in handles {
+            match handle.await {
+                Ok(Ok((event, html))) => {
                     buffer
-                        .table("mkttl_matches")?
-                        .symbol("updated_by", &event.updated_by)?
-                        .column_str("url", &event.url)?
-                        .column_str("raw_html", &html)?
-                        .column_ts("fetched_at", TimestampNanos::now())?
+                        .table(table_name.clone())?
+                        .symbol(updated_by_name.clone(), &event.updated_by)?
+                        .column_str(url_name.clone(), &event.url)?
+                        .column_str(raw_html_name.clone(), &html)?
+                        .column_ts(fetched_at_name.clone(), TimestampNanos::now())?
                         .at(TimestampNanos::new(event.timestamp.timestamp_nanos_opt().unwrap()))?;
 
                     successful_events += 1;
+
+                    // Flush every 5 events to avoid buffer getting too large
+                    if successful_events % 5 == 0 {
+                        self.quest_sender.flush(&mut buffer)?;
+                        let mut stats = self.stats.lock().unwrap();
+                        stats.status = format!("Flushed {} events to QuestDB", successful_events);
+                    }
+                }
+                Ok(Err(e)) => {
+                    error!("Failed to fetch match card: {}", e);
                 }
                 Err(e) => {
-                    error!("Failed to fetch HTML for {}: {}", event.url, e);
-                    continue;
+                    error!("Task failed: {}", e);
                 }
             }
         }
 
-        if successful_events > 0 {
+        // Flush any remaining events
+        if buffer.len() > 0 {
             self.quest_sender.flush(&mut buffer)?;
 
             // Update stats
             let mut stats = self.stats.lock().unwrap();
             stats.total_matches_found += successful_events as u64;
             stats.latest_update = Some(Utc::now());
+            stats.current_url = None;
+            stats.status = format!("Completed processing {} match events successfully", successful_events);
 
             info!("Stored {} match events successfully", successful_events);
         }
@@ -471,6 +567,7 @@ impl Scraper {
             let mut stats = self.stats.lock().unwrap();
             stats.total_results = total_results;
             stats.total_pages = total_pages;
+            stats.status = format!("Found {} total results across {} pages", total_results, total_pages);
         }
 
         info!("Total results: {}, Total pages: {}", total_results, total_pages);
@@ -575,7 +672,7 @@ impl Scraper {
             }
 
             // If we've processed all pages, stop
-            if page >= total_pages as u32 {
+            if page >= total_pages {
                 info!("Processed all pages, stopping scrape");
                 break;
             }
@@ -649,14 +746,11 @@ fn main() -> Result<()> {
             }
         }
         "games" => {
-            info!("Starting game data scraper");
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
-                let mut game_scraper = GameScraper::new(&config)?;
-                if let Err(e) = game_scraper.run().await {
-                    error!("Error in game scraper: {}", e);
-                }
-                Ok::<(), anyhow::Error>(())
+                info!("Starting MKTTL match card game scraper");
+                let mut game_scraper = GameScraper::new(&config).await?;
+                game_scraper.run().await
             })?;
         }
         "web" => {

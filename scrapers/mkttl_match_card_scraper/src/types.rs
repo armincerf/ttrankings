@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
+use serde::{Serialize, Deserialize};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameData {
     pub event_start_time: DateTime<Utc>,
     pub original_start_time: Option<DateTime<Utc>>,

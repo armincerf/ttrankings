@@ -32,7 +32,7 @@ impl CupMatchParser {
             // For each leg in the game
             let leg_scores = scores.split(", ").enumerate();
             for (leg_idx, leg_score) in leg_scores {
-                let (home_score, away_score) = utils::parse_leg_score(leg_score)?;
+                let (home_score, away_score) = utils::parse_score(leg_score)?;
 
                 let game_data = GameData {
                     event_start_time,
@@ -177,71 +177,28 @@ impl CupMatchParser {
     }
 
     fn extract_teams(&self, document: &Html) -> Result<((String, String, i32), (String, String, i32))> {
-        let title = document
-            .select(&Selector::parse("h1").unwrap())
-            .next()
-            .context("Could not find title")?
-            .text()
-            .collect::<String>();
+        let ((home_team, home_club), (away_team, away_club)) = utils::extract_teams_from_og_url(document)?;
+        
+        // Extract handicaps from the teams table
+        let teams_selector = Selector::parse("#teams-table tbody tr").unwrap();
+        let mut home_handicap = 0;
+        let mut away_handicap = 0;
 
-        // Title format: "Little Horwood Destroyers (+50) 338-382 Milton Keynes Musketeers"
-        let parts: Vec<&str> = title.split(" vs ").collect();
-        if parts.len() != 2 {
-            // Split on score instead
-            let score_parts: Vec<&str> = title.split(" ").collect();
-            let mut home_parts = Vec::new();
-            let mut away_parts = Vec::new();
-            let mut found_score = false;
-
-            for part in score_parts {
-                if part.contains("-") && part.chars().all(|c| c.is_numeric() || c == '-') {
-                    found_score = true;
-                    continue;
-                }
-                if !found_score {
-                    home_parts.push(part);
-                } else {
-                    away_parts.push(part);
+        for team_row in document.select(&teams_selector) {
+            let cells: Vec<_> = team_row.select(&Selector::parse("td").unwrap()).collect();
+            if cells.len() >= 3 {
+                let team_name = cells[0].text().collect::<String>();
+                let handicap = cells[2].text().collect::<String>().parse::<i32>().unwrap_or(0);
+                
+                if team_name.contains(&home_team) {
+                    home_handicap = handicap;
+                } else if team_name.contains(&away_team) {
+                    away_handicap = handicap;
                 }
             }
-
-            let home_full = home_parts.join(" ");
-            let away_full = away_parts.join(" ");
-
-            // Extract handicap from home team (format: "Team Name (+50)")
-            let home_handicap = if let Some(start) = home_full.find("(+") {
-                if let Some(end) = home_full[start..].find(")") {
-                    home_full[start+2..start+end].parse::<i32>().unwrap_or(0)
-                } else {
-                    0
-                }
-            } else {
-                0
-            };
-
-            // Extract handicap from away team (format: "Team Name (+50)")
-            let away_handicap = if let Some(start) = away_full.find("(+") {
-                if let Some(end) = away_full[start..].find(")") {
-                    away_full[start+2..start+end].parse::<i32>().unwrap_or(0)
-                } else {
-                    0
-                }
-            } else {
-                0
-            };
-
-            // Remove handicap from team names
-            let home_full = home_full.split("(+").next().unwrap_or(&home_full).trim();
-            let away_full = away_full.split("(+").next().unwrap_or(&away_full).trim();
-
-            // Split into club and team name and swap the order to match (team_name, club_name)
-            let (home_club, home_team) = utils::split_team_name(home_full)?;
-            let (away_club, away_team) = utils::split_team_name(away_full)?;
-
-            Ok(((home_team, home_club, home_handicap), (away_team, away_club, away_handicap)))
-        } else {
-            anyhow::bail!("Failed to parse teams from title")
         }
+
+        Ok(((home_team, home_club, home_handicap), (away_team, away_club, away_handicap)))
     }
 
     fn extract_set_number(&self, game: &scraper::ElementRef) -> Result<usize> {
@@ -284,7 +241,7 @@ impl CupMatchParser {
 
     fn extract_players(&self, cell: &scraper::ElementRef) -> Result<Players> {
         let player_selector = Selector::parse("a").unwrap();
-        let mut players = cell.select(&player_selector);
+        let players = cell.select(&player_selector);
 
         let text = cell.text().collect::<String>();
         let is_doubles = text.contains("&");

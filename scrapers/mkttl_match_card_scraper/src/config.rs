@@ -53,7 +53,11 @@ pub struct ScraperConfig {
 
 impl ScraperConfig {
     pub fn get_questdb_url(&self) -> String {
-        format!("http::addr={}:{};", self.questdb.host, self.questdb.port)
+        format!("http://{}:{}/exec?query=", self.questdb.host, self.questdb.port)
+    }
+
+    pub fn get_questdb_ingester_url(&self) -> String {
+        format!("{}:{}", self.questdb.host, self.questdb.port)
     }
 
     pub fn from_env() -> Self {

@@ -19,6 +19,7 @@ pub struct ScraperStats {
     pub total_pages: u32,
     pub total_results: u32,
     pub status: String,
+    pub current_url: Option<String>,
     pub metrics: Option<ScraperMetrics>,
 }
 
@@ -32,6 +33,7 @@ impl Default for ScraperStats {
             total_pages: 0,
             total_results: 0,
             status: "Initializing".to_string(),
+            current_url: None,
             metrics: None,
         }
     }
@@ -65,6 +67,36 @@ pub async fn index_handler(State(state): State<AppState>) -> Html<String> {
                     document.getElementById('total_results').textContent = stats.total_results;
                     document.getElementById('status').textContent = stats.status;
                     document.getElementById('progress').style.width = `${{(stats.current_page / stats.total_pages * 100) || 0}}%`;
+                    
+                    // Update current URL if present
+                    const currentUrlEl = document.getElementById('current_url');
+                    if (stats.current_url) {{
+                        currentUrlEl.textContent = stats.current_url;
+                        currentUrlEl.parentElement.classList.remove('hidden');
+                    }} else {{
+                        currentUrlEl.parentElement.classList.add('hidden');
+                    }}
+
+                    // Add status to history only if it's different from the last one
+                    const statusHistory = document.getElementById('status_history');
+                    const now = new Date().toLocaleTimeString();
+                    const newStatusText = `[${{now}}] ${{stats.status}}`;
+                    
+                    // Only add if it's different from the last status
+                    const lastStatus = statusHistory.lastChild?.textContent;
+                    if (!lastStatus || !lastStatus.endsWith(stats.status)) {{
+                        const newStatus = document.createElement('div');
+                        newStatus.className = 'text-sm text-gray-600 mb-1';
+                        newStatus.textContent = newStatusText;
+                        
+                        // Keep only last 10 status messages
+                        while (statusHistory.children.length >= 10) {{
+                            statusHistory.removeChild(statusHistory.firstChild);
+                        }}
+                        statusHistory.appendChild(newStatus);
+                        statusHistory.scrollTop = statusHistory.scrollHeight;
+                    }}
+
                     if (stats.metrics) {{
                         document.getElementById('metrics').innerHTML = `
                             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -89,7 +121,8 @@ pub async fn index_handler(State(state): State<AppState>) -> Html<String> {
                     }}
                 }});
         }}
-        setInterval(updateStats, 1000);
+        // Update more frequently (every 200ms)
+        setInterval(updateStats, 200);
         updateStats();
     </script>
 </head>
@@ -125,8 +158,18 @@ pub async fn index_handler(State(state): State<AppState>) -> Html<String> {
             </div>
 
             <div class="mt-6">
-                <h2 class="text-sm font-semibold text-gray-600 mb-2">Status</h2>
+                <h2 class="text-sm font-semibold text-gray-600 mb-2">Current Status</h2>
                 <p class="text-gray-700" id="status">{}</p>
+            </div>
+
+            <div class="mt-4 hidden">
+                <h2 class="text-sm font-semibold text-gray-600 mb-2">Current URL</h2>
+                <p class="text-gray-700 font-mono text-sm break-all" id="current_url"></p>
+            </div>
+
+            <div class="mt-6">
+                <h2 class="text-sm font-semibold text-gray-600 mb-2">Status History</h2>
+                <div id="status_history" class="bg-gray-50 p-4 rounded-lg max-h-40 overflow-y-auto"></div>
             </div>
         </div>
 

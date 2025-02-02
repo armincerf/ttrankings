@@ -1,0 +1,25 @@
+event_start_time,match_id,set_number,leg_number,competition_type,season,division,venue,home_team_name,home_team_club,away_team_name,away_team_club,home_player1,home_player2,away_player1,away_player2,home_score,away_score,handicap_home,handicap_away
+2025-01-29T19:30:00Z,match-20250129-001,1,1,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,John Bradley,,James Beckett,,13,11,0,0
+2025-01-29T19:30:00Z,match-20250129-001,1,2,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,John Bradley,,James Beckett,,11,3,0,0
+2025-01-29T19:30:00Z,match-20250129-001,1,3,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,John Bradley,,James Beckett,,9,11,0,0
+2025-01-29T19:30:00Z,match-20250129-001,1,4,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,John Bradley,,James Beckett,,11,7,0,0
+2025-01-29T19:30:00Z,match-20250129-001,2,1,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,Anjana Navalkissoor,,Colin Beckett,,11,7,0,0
+2025-01-29T19:30:00Z,match-20250129-001,2,2,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,Anjana Navalkissoor,,Colin Beckett,,11,7,0,0
+2025-01-29T19:30:00Z,match-20250129-001,2,3,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,Anjana Navalkissoor,,Colin Beckett,,11,5,0,0
+2025-01-29T19:30:00Z,match-20250129-001,3,1,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,Chris Welch,,Charlie Harrison,,13,11,0,0
+2025-01-29T19:30:00Z,match-20250129-001,3,2,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,Chris Welch,,Charlie Harrison,,11,5,0,0
+2025-01-29T19:30:00Z,match-20250129-001,3,3,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,Chris Welch,,Charlie Harrison,,9,11,0,0
+2025-01-29T19:30:00Z,match-20250129-001,3,4,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,Chris Welch,,Charlie Harrison,,11,0,0,0
+2025-01-29T19:30:00Z,match-20250129-001,4,1,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,John Bradley,Chris Welch,Colin Beckett,James Beckett,11,3,0,0
+2025-01-29T19:30:00Z,match-20250129-001,4,2,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,John Bradley,Chris Welch,Colin Beckett,James Beckett,11,5,0,0
+2025-01-29T19:30:00Z,match-20250129-001,4,3,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,John Bradley,Chris Welch,Colin Beckett,James Beckett,10,12,0,0
+2025-01-29T19:30:00Z,match-20250129-001,4,4,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,John Bradley,Chris Welch,Colin Beckett,James Beckett,10,12,0,0
+2025-01-29T19:30:00Z,match-20250129-001,4,5,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,John Bradley,Chris Welch,Colin Beckett,James Beckett,9,11,0,0
+2025-01-29T19:30:00Z,match-20250129-001,5,1,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,Anjana Navalkissoor,,James Beckett,,7,11,0,0
+2025-01-29T19:30:00Z,match-20250129-001,5,2,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,Anjana Navalkissoor,,James Beckett,,8,11,0,0
+2025-01-29T19:30:00Z,match-20250129-001,5,3,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,Anjana Navalkissoor,,James Beckett,,3,11,0,0
+2025-01-29T19:30:00Z,match-20250129-001,7,1,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,Chris Welch,,Colin Beckett,,6,11,0,0
+2025-01-29T19:30:00Z,match-20250129-001,7,2,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,Chris Welch,,Colin Beckett,,10,12,0,0
+2025-01-29T19:30:00Z,match-20250129-001,7,3,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,Chris Welch,,Colin Beckett,,11,9,0,0
+2025-01-29T19:30:00Z,match-20250129-001,7,4,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,Chris Welch,,Colin Beckett,,11,4,0,0
+2025-01-29T19:30:00Z,match-20250129-001,7,5,League,2024-2025,Division Three,Milton Keynes Table Tennis Centre,Cavaliers,Milton Keynes,Wannabes,Chackmore,Chris Welch,,Colin Beckett,,11,7,0,0

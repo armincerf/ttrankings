@@ -2,31 +2,51 @@ use anyhow::{Context, Result};
 use scraper::{Html, Selector};
 use crate::types::{MatchType, KNOWN_CLUBS};
 
-pub fn detect_match_type(html: &str) -> Result<MatchType> {
-    let document = Html::parse_document(html);
-    let competition_type = document
-        .select(&Selector::parse("h2").unwrap())
+pub fn detect_match_type(document: &Html) -> Result<MatchType> {
+    // First try the title tag
+    let title_selector = Selector::parse("title").unwrap();
+    let title = document
+        .select(&title_selector)
         .next()
-        .map(|el| el.text().collect::<String>().trim().to_string())
-        .context("Could not find competition type")?;
+        .map(|el| el.text().collect::<String>());
 
-    match competition_type.as_str() {
-        "League" => Ok(MatchType::MkttlLeagueMatch),
-        "Challenge Cup" => Ok(MatchType::MkttlChallengeCup),
-        _ => Err(anyhow::anyhow!("Unknown match type: {}", competition_type)),
+    // If title tag is not found, try og:title meta tag
+    let title = match title {
+        Some(t) => t,
+        None => {
+            let og_title_selector = Selector::parse("meta[property='og:title']").unwrap();
+            document
+                .select(&og_title_selector)
+                .next()
+                .and_then(|el| el.value().attr("content"))
+                .ok_or_else(|| anyhow::anyhow!("No title or og:title found"))?
+                .to_string()
+        }
+    };
+
+    if title.contains("Cup") {
+        Ok(MatchType::MkttlChallengeCup)
+    } else {
+        Ok(MatchType::MkttlLeagueMatch)
     }
 }
 
-pub fn parse_leg_score(score: &str) -> Result<(i32, i32)> {
-    let parts: Vec<&str> = score.split("-").collect();
+pub fn parse_score(score: &str) -> Result<(i32, i32)> {
+    let parts: Vec<&str> = score.split('-').collect();
     if parts.len() != 2 {
-        anyhow::bail!("Invalid score format");
+        anyhow::bail!("Invalid score format: {}", score);
     }
 
-    Ok((
-        parts[0].trim().parse()?,
-        parts[1].trim().parse()?,
-    ))
+    let home_score = parts[0]
+        .trim()
+        .parse::<i32>()
+        .with_context(|| format!("Invalid home score: {}", parts[0]))?;
+    let away_score = parts[1]
+        .trim()
+        .parse::<i32>()
+        .with_context(|| format!("Invalid away score: {}", parts[1]))?;
+
+    Ok((home_score, away_score))
 }
 
 pub fn split_team_name(full_name: &str) -> Result<(String, String)> {
@@ -51,6 +71,47 @@ pub fn split_team_name(full_name: &str) -> Result<(String, String)> {
     Ok((club_name, team_name))
 }
 
+fn capitalize_words(s: &str) -> String {
+    s.split_whitespace()
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+            }
+        })
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
+pub fn extract_teams_from_og_url(document: &Html) -> Result<((String, String), (String, String))> {
+    let og_url_selector = Selector::parse("meta[property='og:url']").unwrap();
+    let og_url = document
+        .select(&og_url_selector)
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("No og:url meta tag found"))?
+        .value()
+        .attr("content")
+        .ok_or_else(|| anyhow::anyhow!("No content attribute in og:url meta tag"))?;
+
+    // URL format: https://www.mkttl.co.uk/matches/team/club1/team1/club2/team2/year/month/day
+    let parts: Vec<&str> = og_url.split('/').collect();
+    if parts.len() < 9 {
+        anyhow::bail!("Invalid URL format: {}", og_url);
+    }
+
+    // Extract team and club names from the URL parts
+    let home_team_club = parts[parts.len() - 7].replace("-", " ");
+    let home_team_name = parts[parts.len() - 6].replace("-", " ");
+    let away_team_club = parts[parts.len() - 5].replace("-", " ");
+    let away_team_name = parts[parts.len() - 4].replace("-", " ");
+
+    Ok((
+        (capitalize_words(&home_team_name), capitalize_words(&home_team_club)),
+        (capitalize_words(&away_team_name), capitalize_words(&away_team_club)),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,9 +133,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_leg_score() {
-        assert_eq!(parse_leg_score("11-9").unwrap(), (11, 9));
-        assert_eq!(parse_leg_score("9-11").unwrap(), (9, 11));
-        assert!(parse_leg_score("invalid").is_err());
+    fn test_parse_score() {
+        assert_eq!(parse_score("11-9").unwrap(), (11, 9));
+        assert_eq!(parse_score("9-11").unwrap(), (9, 11));
+        assert!(parse_score("invalid").is_err());
     }
 } 

@@ -26,39 +26,50 @@ impl LeagueMatchParser {
         let games_selector = Selector::parse("#games-table tbody tr").unwrap();
 
         for game in document.select(&games_selector) {
-            let set_number = self.extract_set_number(&game)?;
-            let (players, scores) = self.extract_game_data(&game)?;
+            let set_number = match self.extract_set_number(&game) {
+                Ok(num) => num,
+                Err(_) => continue, // Skip this game if we can't get the set number
+            };
 
-            // For each leg in the game
-            let leg_scores = scores.split(", ").enumerate();
-            for (leg_idx, leg_score) in leg_scores {
-                let (home_score, away_score) = utils::parse_leg_score(leg_score)?;
+            // Try to extract game data, skip if not played
+            match self.extract_game_data(&game) {
+                Ok((players, scores)) => {
+                    // For each leg in the game
+                    let leg_scores = scores.split(", ").enumerate();
+                    for (leg_idx, leg_score) in leg_scores {
+                        match utils::parse_score(leg_score) {
+                            Ok((home_score, away_score)) => {
+                                let game_data = GameData {
+                                    event_start_time,
+                                    original_start_time: None,
+                                    match_id: match_id.to_string(),
+                                    set_number: set_number as i32,
+                                    leg_number: (leg_idx + 1) as i32,
+                                    competition_type: competition_type.clone(),
+                                    season: season.clone(),
+                                    division: division.clone(),
+                                    venue: venue.clone(),
+                                    home_team_name: home_team_name.clone(),
+                                    home_team_club: home_team_club.clone(),
+                                    away_team_name: away_team_name.clone(),
+                                    away_team_club: away_team_club.clone(),
+                                    home_player1: players.home_player1.clone(),
+                                    home_player2: players.home_player2.clone(),
+                                    away_player1: players.away_player1.clone(),
+                                    away_player2: players.away_player2.clone(),
+                                    home_score,
+                                    away_score,
+                                    handicap_home: 0,
+                                    handicap_away: 0,
+                                };
 
-                let game_data = GameData {
-                    event_start_time,
-                    original_start_time: None,
-                    match_id: match_id.to_string(),
-                    set_number: set_number as i32,
-                    leg_number: (leg_idx + 1) as i32,
-                    competition_type: competition_type.clone(),
-                    season: season.clone(),
-                    division: division.clone(),
-                    venue: venue.clone(),
-                    home_team_name: home_team_name.clone(),
-                    home_team_club: home_team_club.clone(),
-                    away_team_name: away_team_name.clone(),
-                    away_team_club: away_team_club.clone(),
-                    home_player1: players.home_player1.clone(),
-                    home_player2: players.home_player2.clone(),
-                    away_player1: players.away_player1.clone(),
-                    away_player2: players.away_player2.clone(),
-                    home_score,
-                    away_score,
-                    handicap_home: 0,
-                    handicap_away: 0,
-                };
-
-                games.push(game_data);
+                                games.push(game_data);
+                            }
+                            Err(_) => continue, // Skip this leg if we can't parse the score
+                        }
+                    }
+                }
+                Err(_) => continue, // Skip this game if it wasn't played
             }
         }
 
@@ -117,7 +128,9 @@ impl LeagueMatchParser {
                 let cells: Vec<_> = row.select(&cell_selector).collect();
                 if cells.len() >= 2 {
                     if cells[0].text().collect::<String>().contains("Venue") {
-                        return Ok(cells[1].text().collect::<String>());
+                        // Extract text from all child nodes, including anchor tags
+                        let venue = cells[1].text().collect::<String>();
+                        return Ok(venue);
                     }
                 }
             }
@@ -174,27 +187,7 @@ impl LeagueMatchParser {
     }
 
     fn extract_teams(&self, document: &Html) -> Result<((String, String), (String, String))> {
-        let title = document
-            .select(&Selector::parse("h1").unwrap())
-            .next()
-            .context("Could not find title")?
-            .text()
-            .collect::<String>();
-
-        // Split on "vs" to get home and away teams
-        let parts: Vec<&str> = title.split(" vs ").collect();
-        if parts.len() != 2 {
-            return Err(anyhow::Error::msg("Failed to split on 'vs'"));
-        }
-
-        let home_full = parts[0].trim();
-        let away_full = parts[1].trim();
-
-        // For each team name, find the last word as the team name and the rest as the club
-        let (home_club, home_team) = utils::split_team_name(home_full)?;
-        let (away_club, away_team) = utils::split_team_name(away_full)?;
-
-        Ok(((home_team, home_club), (away_team, away_club)))
+        utils::extract_teams_from_og_url(document)
     }
 
     fn extract_set_number(&self, game: &scraper::ElementRef) -> Result<usize> {
@@ -215,20 +208,39 @@ impl LeagueMatchParser {
             .next()
             .context("Failed to find result cell")?;
 
-        let players = self.extract_players(&result_cell)?;
-
+        let result_text = result_cell.text().collect::<String>();
         let scores = game
             .select(&scores_selector)
             .next()
             .map(|el| el.text().collect::<String>())
             .context("Failed to extract scores")?;
 
+        // Skip games that were not played at all
+        if scores.contains("Not applicable") || 
+           result_text.contains("not played") || 
+           scores.trim().is_empty() {
+            anyhow::bail!("Game was not played");
+        }
+
+        let players = self.extract_players(&result_cell)?;
+
+        // For retired games or games that finished early, we don't want to include them
+        // even if they have valid scores
+        if result_text.contains("retired") || result_text.contains("finished early") {
+            anyhow::bail!("Game was not played");
+        }
+
+        // For normal games, ensure there are valid scores
+        if !scores.contains("-") || scores.split(", ").all(|s| s.trim().is_empty()) {
+            anyhow::bail!("Game was not played");
+        }
+
         Ok((players, scores))
     }
 
     fn extract_players(&self, cell: &scraper::ElementRef) -> Result<Players> {
         let player_selector = Selector::parse("a").unwrap();
-        let mut players = cell.select(&player_selector);
+        let players = cell.select(&player_selector);
 
         let text = cell.text().collect::<String>();
         let is_doubles = text.contains("&");
@@ -268,13 +280,16 @@ impl LeagueMatchParser {
                 Err(anyhow::anyhow!("Unexpected number of players for doubles match"))
             }
         } else {
-            let home_player = players.next().context("Missing home player")?;
-            let away_player = players.next().context("Missing away player")?;
+            // For singles matches, just get the two players
+            let all_players: Vec<_> = players.collect();
+            if all_players.len() != 2 {
+                return Err(anyhow::anyhow!("Expected 2 players for singles match"));
+            }
 
             Ok(Players {
-                home_player1: home_player.text().collect(),
+                home_player1: all_players[0].text().collect(),
                 home_player2: None,
-                away_player1: away_player.text().collect(),
+                away_player1: all_players[1].text().collect(),
                 away_player2: None,
             })
         }

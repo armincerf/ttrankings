@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use questdb::ingress::{Buffer, ColumnName, Sender, TimestampNanos};
 use serde::Deserialize;
 use tracing::{error, info};
+use scraper::Html;
 
 use crate::config::ScraperConfig;
 use crate::league_match::LeagueMatchParser;
@@ -16,14 +17,15 @@ struct MatchRecord {
 }
 
 pub struct GameScraper {
-    quest_sender: Sender,
+    quest_sender: Option<Sender>,
     client: reqwest::Client,
+    league_match_parser: LeagueMatchParser,
+    cup_match_parser: CupMatchParser,
+    games: Vec<GameData>,
 }
 
 impl GameScraper {
-    pub fn new(config: &ScraperConfig) -> Result<Self> {
-        let quest_sender = Sender::from_conf(&config.get_questdb_url())
-            .context("Failed to create QuestDB sender")?;
+    pub async fn new(config: &ScraperConfig) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(
                 config.scraping.request_timeout_secs,
@@ -32,8 +34,11 @@ impl GameScraper {
             .context("Failed to create HTTP client")?;
 
         Ok(Self {
-            quest_sender,
+            quest_sender: None,
             client,
+            league_match_parser: LeagueMatchParser::new(),
+            cup_match_parser: CupMatchParser::new(),
+            games: Vec::new(),
         })
     }
 
@@ -84,32 +89,37 @@ impl GameScraper {
         Ok(())
     }
 
-    pub fn process_html(&mut self, html: &str, match_url: &str) -> Result<()> {
-        let match_type = detect_match_type(html)?;
-        let games = match match_type {
+    pub fn parse_html(&self, html: &str, match_url: &str) -> Result<Vec<GameData>> {
+        let document = Html::parse_document(html);
+        let match_type = detect_match_type(&document)?;
+        match match_type {
             MatchType::MkttlLeagueMatch => {
-                let parser = LeagueMatchParser::new();
-                parser.parse(html, match_url)?
+                self.league_match_parser.parse(html, match_url)
             }
             MatchType::MkttlChallengeCup => {
-                let parser = CupMatchParser::new();
-                parser.parse(html, match_url)?
+                self.cup_match_parser.parse(html, match_url)
             }
-        };
-
-        let mut buffer = Buffer::new();
-        for game in games {
-            self.write_game_to_buffer(&mut buffer, &game)?;
         }
+    }
 
-        // Flush the buffer to QuestDB
-        info!("Flushing buffer to QuestDB");
-        self.quest_sender.flush(&mut buffer)?;
-        info!("Buffer flushed successfully");
+    pub fn process_html(&mut self, html: &str, match_url: &str) -> Result<()> {
+        let games = self.parse_html(html, match_url)?;
+
+        if let Some(ref mut sender) = self.quest_sender {
+            let mut buffer = Buffer::new();
+            for game in &games {
+                GameScraper::write_game_to_buffer(&mut buffer, game)?;
+            }
+
+            // Flush the buffer to QuestDB
+            info!("Flushing buffer to QuestDB");
+            sender.flush(&mut buffer)?;
+            info!("Buffer flushed successfully");
+        }
         Ok(())
     }
 
-    fn write_game_to_buffer(&self, buffer: &mut Buffer, game: &GameData) -> Result<()> {
+    fn write_game_to_buffer(buffer: &mut Buffer, game: &GameData) -> Result<()> {
         info!(
             "Writing game to buffer: match_id={}, set={}, leg={}",
             game.match_id, game.set_number, game.leg_number
@@ -192,10 +202,10 @@ mod tests {
     use super::*;
     use crate::config::ScraperConfig;
 
-    #[test]
-    fn test_game_scraper_new() {
+    #[tokio::test]
+    async fn test_game_scraper_new() {
         let config = ScraperConfig::default();
-        let result = GameScraper::new(&config);
+        let result = GameScraper::new(&config).await;
         assert!(result.is_ok());
     }
 }

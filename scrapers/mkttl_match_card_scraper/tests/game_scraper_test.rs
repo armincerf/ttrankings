@@ -1,17 +1,16 @@
 use anyhow::Result;
 use chrono::{DateTime, NaiveDateTime, Utc};
-use questdb::ingress::{Buffer, Sender};
 use serde::Deserialize;
-use std::env;
 use test_log::test;
 use tracing::info;
 
 // Import the crate using the package name from Cargo.toml
 extern crate mkttl_match_card_scraper;
-use mkttl_match_card_scraper::{config::ScraperConfig, game_scraper::GameScraper};
+use mkttl_match_card_scraper::{config::ScraperConfig, game_scraper::GameScraper, types::GameData};
 
 const TEST_LEAGUE_MATCH_URL: &str = "match-20250131-001";
 const TEST_CUP_MATCH_URL: &str = "match-20250130-001";
+const TEST_PARTIAL_MATCH_URL: &str = "match-20250129-001";
 
 #[derive(Debug, Deserialize)]
 struct GameRecord {
@@ -37,95 +36,27 @@ struct GameRecord {
     handicap_away: i32,
 }
 
-async fn process_league_match(game_scraper: &mut GameScraper) -> Result<()> {
-    let html = include_str!("fixtures/league_match/match_104_68_2025_1_31.html");
-    let expected_csv = include_str!("fixtures/league_match/match_104_68_2025_1_31.csv");
-    process_match_data(game_scraper, TEST_LEAGUE_MATCH_URL, html, expected_csv).await
+async fn process_league_match() -> Result<Vec<GameData>> {
+    let config = ScraperConfig::default();
+    let scraper = GameScraper::new(&config).await?;
+    scraper.parse_html(include_str!("fixtures/league_match/match_104_68_2025_1_31.html"), TEST_LEAGUE_MATCH_URL)
 }
 
-async fn process_cup_match(game_scraper: &mut GameScraper) -> Result<()> {
-    let html = include_str!("fixtures/cup_match/match-20250130-001.html");
-    let expected_csv = include_str!("fixtures/cup_match/match-20250130-001.csv");
-    process_match_data(game_scraper, TEST_CUP_MATCH_URL, html, expected_csv).await
+async fn process_cup_match() -> Result<Vec<GameData>> {
+    let config = ScraperConfig::default();
+    let scraper = GameScraper::new(&config).await?;
+    scraper.parse_html(include_str!("fixtures/cup_match/match-20250130-001.html"), TEST_CUP_MATCH_URL)
 }
 
-async fn process_match_data(game_scraper: &mut GameScraper, match_url: &str, html: &str, expected_csv: &str) -> Result<()> {
-    // Clean up any existing test data by dropping and recreating the table
-    let client = reqwest::Client::new();
-    let cleanup_queries = [
-        "DROP TABLE IF EXISTS table_tennis_games;",
-        "CREATE TABLE IF NOT EXISTS table_tennis_games (
-            -- When the match/leg started; used as the designated timestamp for time-series queries
-            event_start_time TIMESTAMP,
-            -- Only used if the event was rescheduled
-            original_start_time TIMESTAMP,
+async fn process_partial_match() -> Result<Vec<GameData>> {
+    let config = ScraperConfig::default();
+    let scraper = GameScraper::new(&config).await?;
+    scraper.parse_html(include_str!("fixtures/league_match/partially_complete_match.html"), TEST_PARTIAL_MATCH_URL)
+}
 
-            -- Identifiers
-            match_id SYMBOL capacity 256 cache index,       -- identifier to group legs/sets into the same match
-            set_number INT,        -- number of the set within a match
-            leg_number INT,        -- leg (game) index within the set
-
-            -- Competition metadata
-            competition_type SYMBOL capacity 256 cache,   -- e.g. 'league', 'tournament', 'singles'
-            season SYMBOL capacity 256 cache,             -- season identifier, may be empty if unknown
-            division SYMBOL capacity 256 cache,           -- league division, may be empty for singles league
-
-            -- Venue information
-            venue SYMBOL capacity 256 cache,
-
-            -- Home team data: both the specific team name and the broader club it belongs to
-            home_team_name SYMBOL capacity 256 cache,
-            home_team_club SYMBOL capacity 256 cache,
-
-            -- Away team data: similarly split into team name and club
-            away_team_name SYMBOL capacity 256 cache,
-            away_team_club SYMBOL capacity 256 cache,
-
-            -- Player names (up to two per side; for a singles match the secondary can be empty)
-            home_player1 SYMBOL capacity 256 cache,
-            home_player2 SYMBOL capacity 256 cache,     
-            away_player1 SYMBOL capacity 256 cache,
-            away_player2 SYMBOL capacity 256 cache,
-
-            -- Scores for this leg; overall match totals can be computed via aggregation later
-            home_score INT,
-            away_score INT,
-
-            -- Optional handicap bonus points if applicable
-            handicap_home INT,
-            handicap_away INT
-        ) TIMESTAMP(event_start_time)
-        PARTITION BY DAY WAL DEDUP UPSERT KEYS(match_id, set_number, leg_number, home_player1, home_player2, away_player1, away_player2, home_score, away_score);"
-    ];
-
-    for query in cleanup_queries {
-        let cleanup_url = "http://localhost:9000/exec";
-        client.post(cleanup_url)
-            .header("Content-Type", "application/json")
-            .body(format!("{{\"query\":\"{}\"}}", query))
-            .send()
-            .await?;
-    }
-
-    // Process the HTML
-    game_scraper.process_html(html, match_url)?;
-
-    // Query the results from QuestDB
-    let query = format!(
-        "SELECT event_start_time, match_id, set_number, leg_number, competition_type, season, division, venue, home_team_name, home_team_club, away_team_name, away_team_club, home_player1, home_player2, away_player1, away_player2, home_score, away_score, handicap_home, handicap_away, original_start_time FROM table_tennis_games WHERE match_id = '{}' ORDER BY set_number, leg_number;",
-        match_url
-    );
-    let quest_query_url = format!(
-        "http://localhost:9000/exec?query={}",
-        urlencoding::encode(&query)
-    );
-
-    let response = client.get(&quest_query_url).send().await?;
-    let json: serde_json::Value = response.json().await?;
-    info!("QuestDB response: {}", serde_json::to_string_pretty(&json)?);
-    let results = json["dataset"]
-        .as_array()
-        .expect("Expected array of results");
+fn process_match_data(game_scraper: &GameScraper, match_url: &str, html: &str, expected_csv: &str) -> Result<()> {
+    // Parse the HTML
+    let actual_games = game_scraper.parse_html(html, match_url)?;
 
     // Parse expected CSV
     let mut expected_records = Vec::new();
@@ -169,8 +100,9 @@ async fn process_match_data(game_scraper: &mut GameScraper, match_url: &str, htm
         let home_player2 = if record[home_player2_idx].is_empty() { None } else { Some(record[home_player2_idx].to_string()) };
         let away_player2 = if record[away_player2_idx].is_empty() { None } else { Some(record[away_player2_idx].to_string()) };
 
-        expected_records.push(GameRecord {
+        expected_records.push(GameData {
             event_start_time,
+            original_start_time: None,
             match_id: record[match_id_idx].to_string(),
             set_number: record[set_number_idx].parse()?,
             leg_number: record[leg_number_idx].parse()?,
@@ -194,119 +126,89 @@ async fn process_match_data(game_scraper: &mut GameScraper, match_url: &str, htm
     }
 
     // Compare results
-    assert_eq!(results.len(), expected_records.len(), "Number of results doesn't match expected");
+    assert_eq!(actual_games.len(), expected_records.len(), "Number of results doesn't match expected");
 
     for (i, expected) in expected_records.iter().enumerate() {
-        let actual = &results[i];
+        let actual = &actual_games[i];
         
         assert_eq!(
-            actual[0].as_str().unwrap(),
-            format!("{}.000000Z", expected.event_start_time.format("%Y-%m-%dT%H:%M:%S")),
+            actual.event_start_time, expected.event_start_time,
             "Mismatch in event_start_time at index {}", i
         );
         assert_eq!(
-            actual[1].as_str().unwrap(),
-            expected.match_id,
+            actual.match_id, expected.match_id,
             "Mismatch in match_id at index {}", i
         );
         assert_eq!(
-            actual[2].as_i64().unwrap() as i32,
-            expected.set_number,
+            actual.set_number, expected.set_number,
             "Mismatch in set_number at index {}", i
         );
         assert_eq!(
-            actual[3].as_i64().unwrap() as i32,
-            expected.leg_number,
+            actual.leg_number, expected.leg_number,
             "Mismatch in leg_number at index {}", i
         );
         assert_eq!(
-            actual[4].as_str().unwrap(),
-            expected.competition_type,
+            actual.competition_type, expected.competition_type,
             "Mismatch in competition_type at index {}", i
         );
         assert_eq!(
-            actual[5].as_str().unwrap(),
-            expected.season,
+            actual.season, expected.season,
             "Mismatch in season at index {}", i
         );
         assert_eq!(
-            actual[6].as_str().unwrap(),
-            expected.division,
+            actual.division, expected.division,
             "Mismatch in division at index {}", i
         );
         assert_eq!(
-            actual[7].as_str().unwrap(),
-            expected.venue,
+            actual.venue, expected.venue,
             "Mismatch in venue at index {}", i
         );
         assert_eq!(
-            actual[8].as_str().unwrap(),
-            expected.home_team_name,
+            actual.home_team_name, expected.home_team_name,
             "Mismatch in home_team_name at index {}", i
         );
         assert_eq!(
-            actual[9].as_str().unwrap(),
-            expected.home_team_club,
+            actual.home_team_club, expected.home_team_club,
             "Mismatch in home_team_club at index {}", i
         );
         assert_eq!(
-            actual[10].as_str().unwrap(),
-            expected.away_team_name,
+            actual.away_team_name, expected.away_team_name,
             "Mismatch in away_team_name at index {}", i
         );
         assert_eq!(
-            actual[11].as_str().unwrap(),
-            expected.away_team_club,
+            actual.away_team_club, expected.away_team_club,
             "Mismatch in away_team_club at index {}", i
         );
         assert_eq!(
-            actual[12].as_str().unwrap(),
-            expected.home_player1,
+            actual.home_player1, expected.home_player1,
             "Mismatch in home_player1 at index {}", i
         );
-        
-        match &expected.home_player2 {
-            Some(p) => assert_eq!(
-                actual[13].as_str().unwrap(),
-                p,
-                "Mismatch in home_player2 at index {}", i
-            ),
-            None => assert!(actual[13].is_null(), "Expected null home_player2 at index {}", i),
-        }
-
         assert_eq!(
-            actual[14].as_str().unwrap(),
-            expected.away_player1,
+            actual.home_player2, expected.home_player2,
+            "Mismatch in home_player2 at index {}", i
+        );
+        assert_eq!(
+            actual.away_player1, expected.away_player1,
             "Mismatch in away_player1 at index {}", i
         );
-
-        match &expected.away_player2 {
-            Some(p) => assert_eq!(
-                actual[15].as_str().unwrap(),
-                p,
-                "Mismatch in away_player2 at index {}", i
-            ),
-            None => assert!(actual[15].is_null(), "Expected null away_player2 at index {}", i),
-        }
-
         assert_eq!(
-            actual[16].as_i64().unwrap() as i32,
-            expected.home_score,
+            actual.away_player2, expected.away_player2,
+            "Mismatch in away_player2 at index {}", i
+        );
+        assert_eq!(
+            actual.home_score, expected.home_score,
             "Mismatch in home_score at index {}", i
         );
         assert_eq!(
-            actual[17].as_i64().unwrap() as i32,
-            expected.away_score,
+            actual.away_score, expected.away_score,
             "Mismatch in away_score at index {}", i
         );
         assert_eq!(
-            actual[18].as_i64().unwrap() as i32,
-            expected.handicap_home,
+            actual.handicap_home, expected.handicap_home,
             "Mismatch in handicap_home at index {}", i
         );
         assert_eq!(
-            actual[19].as_i64().unwrap() as i32,
-            expected.handicap_away,
+            actual.handicap_away, expected.handicap_away,
             "Mismatch in handicap_away at index {}", i
         );
     }
@@ -314,16 +216,23 @@ async fn process_match_data(game_scraper: &mut GameScraper, match_url: &str, htm
     Ok(())
 }
 
-#[test(tokio::test)]
+#[tokio::test]
 async fn test_league_match() -> Result<()> {
-    let config = ScraperConfig::default();
-    let mut game_scraper = GameScraper::new(&config)?;
-    process_league_match(&mut game_scraper).await
+    let games = process_league_match().await?;
+    assert_eq!(games.len(), 38, "Expected 38 legs in the league match");
+    Ok(())
 }
 
-#[test(tokio::test)]
+#[tokio::test]
 async fn test_cup_match() -> Result<()> {
-    let config = ScraperConfig::default();
-    let mut game_scraper = GameScraper::new(&config)?;
-    process_cup_match(&mut game_scraper).await
+    let games = process_cup_match().await?;
+    assert_eq!(games.len(), 20, "Expected 20 legs in the cup match");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_partial_match() -> Result<()> {
+    let games = process_partial_match().await?;
+    assert_eq!(games.len(), 24, "Expected 24 legs in the partial match");
+    Ok(())
 } 
