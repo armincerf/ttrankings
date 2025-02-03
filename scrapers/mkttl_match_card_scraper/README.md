@@ -1,20 +1,21 @@
 # MKTTL Match Card Scraper
 
-This is a Rust application that scrapes match card data from the Milton Keynes Table Tennis League website (mkttl.co.uk). It monitors the event log for match updates and stores the data in QuestDB for further analysis.
+A Rust application that scrapes and processes match card data from the Milton Keynes Table Tennis League website (mkttl.co.uk). It monitors the event log for match updates, downloads match HTML files, and converts them to CSV format for analysis.
 
 ## Features
 
 - Monitors the MKTTL event log for match updates
-- Extracts match card URLs from event descriptions
-- Stores match data in QuestDB with timestamps
-- Supports both full and incremental scraping modes
-- Maintains a marker file to track the last processed event
-- Deduplicates match URLs to avoid duplicate entries
+- Downloads and caches match HTML files
+- Converts match data to CSV format with detailed game information
+- Supports both batch and individual file processing
+- Maintains state to avoid unnecessary downloads
+- Validates cache coverage and detects missing/orphaned files
+- Rate-limited concurrent downloads
+- Progress tracking and detailed logging
 
 ## Prerequisites
 
-- Rust 1.40 or later
-- QuestDB server running locally or accessible via network
+- Rust (latest stable version)
 - Internet access to reach mkttl.co.uk
 
 ## Installation
@@ -26,34 +27,66 @@ This is a Rust application that scrapes match card data from the Milton Keynes T
    cargo build --release
    ```
 
-## Configuration
-
-The scraper uses the following environment variables:
-
-- `QDB_CLIENT_CONF`: QuestDB connection configuration string (default: "http::addr=localhost:9000;")
-
-Example configuration:
-```bash
-export QDB_CLIENT_CONF="http::addr=localhost:9000;username=admin;password=quest;"
-```
-
 ## Usage
 
-Run the scraper:
+### Scraping HTML Files
+
+To download match HTML files from the website:
 ```bash
-cargo run --release
+cargo run --release --bin mkttl_match_card_scraper -- scrape-html
 ```
 
-The first run will perform a full scrape of all available match data. Subsequent runs will only fetch new updates since the last run.
+Optional flags:
+- `--limit <number>`: Limit the number of matches to scrape
 
-## Data Storage
+### Converting HTML to CSV
 
-Match data is stored in QuestDB in the `mkttl_matches` table with the following schema:
+There are two ways to convert HTML files to CSV:
 
-- `timestamp` (TIMESTAMP): When the match was updated
-- `url` (STRING): The match card URL (without protocol)
-- `updated_by` (SYMBOL): Username of the person who updated the match
-- `tx_time` (TIMESTAMP): Time of insertion into QuestDB
+1. Batch Processing (Recommended):
+```bash
+cargo run --bin batch_process
+```
+This will process all HTML files in parallel and show a progress bar.
+
+2. Individual File Processing:
+```bash
+cargo run --bin mkttl_match_card_scraper -- process-file --file path/to/file.html
+```
+
+### Output Format
+
+CSV files are created in the `parsed_html_output` directory with the following columns:
+- event_start_time
+- match_id
+- set_number
+- leg_number
+- competition_type
+- season
+- division
+- venue
+- home_team_name
+- home_team_club
+- away_team_name
+- away_team_club
+- home_player1
+- home_player2
+- away_player1
+- away_player2
+- home_score
+- away_score
+- handicap_home
+- handicap_away
+- report_html
+
+## Project Structure
+
+- `src/match_html_scraper.rs`: Main scraper logic for downloading HTML files
+- `src/game_scraper.rs`: HTML to CSV conversion logic
+- `src/bin/batch_process.rs`: Parallel batch processing of HTML files
+- `html_files/`: Downloaded HTML files
+- `html_files/cache/`: Cache of event log data
+- `parsed_html_output/`: Generated CSV files
 
 ## Development
 

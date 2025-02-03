@@ -1,0 +1,6 @@
+/data/html
+/data/urls.txt
+html_files/
+parsed_html_output/
+**/.DS_Store
+.DS_Store

@@ -34,6 +34,7 @@ struct GameRecord {
     away_score: i32,
     handicap_home: i32,
     handicap_away: i32,
+    report_html: Option<String>,
 }
 
 async fn process_league_match() -> Result<Vec<GameData>> {
@@ -90,6 +91,7 @@ fn process_match_data(game_scraper: &GameScraper, match_url: &str, html: &str, e
     let away_score_idx = get_column_index("away_score")?;
     let handicap_home_idx = get_column_index("handicap_home")?;
     let handicap_away_idx = get_column_index("handicap_away")?;
+    let report_html_idx = get_column_index("report_html")?;
 
     for result in rdr.records() {
         let record = result?;
@@ -122,6 +124,7 @@ fn process_match_data(game_scraper: &GameScraper, match_url: &str, html: &str, e
             away_score: record[away_score_idx].parse()?,
             handicap_home: record[handicap_home_idx].parse()?,
             handicap_away: record[handicap_away_idx].parse()?,
+            report_html: if record[report_html_idx].is_empty() { None } else { Some(record[report_html_idx].to_string()) },
         });
     }
 
@@ -210,6 +213,10 @@ fn process_match_data(game_scraper: &GameScraper, match_url: &str, html: &str, e
         assert_eq!(
             actual.handicap_away, expected.handicap_away,
             "Mismatch in handicap_away at index {}", i
+        );
+        assert_eq!(
+            actual.report_html, expected.report_html,
+            "Mismatch in report_html at index {}", i
         );
     }
 

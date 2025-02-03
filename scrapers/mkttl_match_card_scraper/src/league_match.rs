@@ -21,6 +21,7 @@ impl LeagueMatchParser {
         let venue = self.extract_venue(&document)?;
         let event_start_time = self.extract_start_time(&document)?;
         let ((home_team_name, home_team_club), (away_team_name, away_team_club)) = self.extract_teams(&document)?;
+        let report_html = self.extract_report_html(&document);
 
         // Extract games data
         let games_selector = Selector::parse("#games-table tbody tr").unwrap();
@@ -61,6 +62,7 @@ impl LeagueMatchParser {
                                     away_score,
                                     handicap_home: 0,
                                     handicap_away: 0,
+                                    report_html: report_html.clone(),
                                 };
 
                                 games.push(game_data);
@@ -153,12 +155,8 @@ impl LeagueMatchParser {
                 if cells.len() >= 2 {
                     let header = cells[0].text().collect::<String>();
                     if header.contains("Date") || header.contains("New date") {
-                        // Extract just the day, month, and year
-                        let full_date = cells[1].text().collect::<String>();
-                        let parts: Vec<&str> = full_date.split_whitespace().collect();
-                        if parts.len() >= 4 {
-                            date_str = format!("{} {} {}", parts[1], parts[2], parts[3]);
-                        }
+                        // Use the full date string
+                        date_str = cells[1].text().collect::<String>();
                     } else if header.contains("Start time") {
                         time_str = cells[1].text().collect::<String>();
                     }
@@ -169,11 +167,7 @@ impl LeagueMatchParser {
         // If we couldn't find the date in the table, try the h4 tag
         if date_str.is_empty() {
             if let Some(h4) = document.select(&Selector::parse("h4").unwrap()).next() {
-                let full_date = h4.text().collect::<String>();
-                let parts: Vec<&str> = full_date.split_whitespace().collect();
-                if parts.len() >= 4 {
-                    date_str = format!("{} {} {}", parts[1], parts[2], parts[3]);
-                }
+                date_str = h4.text().collect::<String>();
             }
         }
 
@@ -181,9 +175,27 @@ impl LeagueMatchParser {
             anyhow::bail!("Failed to extract date or time");
         }
 
+        // Clean up the date string by removing the day of the week if present
+        let date_str = if date_str.contains(" ") {
+            let parts: Vec<&str> = date_str.split_whitespace().collect();
+            if parts.len() == 4 {
+                // Format: "Thursday 31 January 2025"
+                format!("{} {} {}", parts[1], parts[2], parts[3])
+            } else {
+                date_str
+            }
+        } else {
+            date_str
+        };
+
         let datetime_str = format!("{} {}", date_str, time_str);
-        let naive_dt = NaiveDateTime::parse_from_str(&datetime_str, "%d %B %Y %H:%M")?;
-        Ok(DateTime::from_naive_utc_and_offset(naive_dt, Utc))
+        // Try different date formats
+        NaiveDateTime::parse_from_str(&datetime_str, "%d %B %Y %H:%M")
+            .or_else(|_| NaiveDateTime::parse_from_str(&datetime_str, "%-d %B %Y %H:%M"))
+            .or_else(|_| NaiveDateTime::parse_from_str(&datetime_str, "%d/%m/%Y %H:%M"))
+            .or_else(|_| NaiveDateTime::parse_from_str(&datetime_str, "%-d/%m/%Y %H:%M"))
+            .map(|naive_dt| DateTime::from_naive_utc_and_offset(naive_dt, Utc))
+            .map_err(|e| anyhow::anyhow!("Failed to parse date and time: {}", e))
     }
 
     fn extract_teams(&self, document: &Html) -> Result<((String, String), (String, String))> {
@@ -293,5 +305,13 @@ impl LeagueMatchParser {
                 away_player2: None,
             })
         }
+    }
+
+    fn extract_report_html(&self, document: &Html) -> Option<String> {
+        let report_selector = Selector::parse("#report-text").unwrap();
+        document
+            .select(&report_selector)
+            .next()
+            .map(|el| el.html())
     }
 } 

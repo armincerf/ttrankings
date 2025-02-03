@@ -24,6 +24,7 @@ pub struct GameData {
     pub away_score: i32,
     pub handicap_home: i32,
     pub handicap_away: i32,
+    pub report_html: Option<String>,
 }
 
 #[derive(Debug)]

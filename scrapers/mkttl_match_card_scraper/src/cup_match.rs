@@ -21,6 +21,7 @@ impl CupMatchParser {
         let venue = self.extract_venue(&document)?;
         let (event_start_time, original_start_time) = self.extract_start_time(&document)?;
         let ((home_team_name, home_team_club, home_handicap), (away_team_name, away_team_club, away_handicap)) = self.extract_teams(&document)?;
+        let report_html = self.extract_report_html(&document);
 
         // Extract games data
         let games_selector = Selector::parse("#games-table tbody tr").unwrap();
@@ -28,6 +29,11 @@ impl CupMatchParser {
         for game in document.select(&games_selector) {
             let set_number = self.extract_set_number(&game)?;
             let (players, scores) = self.extract_game_data(&game)?;
+
+            // Skip games where a player is absent or game not played
+            if scores == "Away player absent" || scores == "Not applicable" {
+                continue;
+            }
 
             // For each leg in the game
             let leg_scores = scores.split(", ").enumerate();
@@ -56,6 +62,7 @@ impl CupMatchParser {
                     away_score,
                     handicap_home: home_handicap,
                     handicap_away: away_handicap,
+                    report_html: report_html.clone(),
                 };
 
                 games.push(game_data);
@@ -120,24 +127,33 @@ impl CupMatchParser {
     }
 
     fn extract_start_time(&self, document: &Html) -> Result<(DateTime<Utc>, Option<DateTime<Utc>>)> {
-        let selector = Selector::parse("table.vertical tr").unwrap();
         let mut new_date_str = String::new();
         let mut original_date_str = String::new();
         let mut time_str = String::new();
 
+        // Try both table selectors
+        let selectors = [
+            Selector::parse("table.vertical tr").unwrap(),
+            Selector::parse("table tr").unwrap(),
+        ];
+
         // First try to find new date and original date
-        for row in document.select(&selector) {
-            let header = row.select(&Selector::parse("th").unwrap()).next();
-            let value = row.select(&Selector::parse("td").unwrap()).next();
-            
-            if let (Some(header), Some(value)) = (header, value) {
-                let header_text = header.text().collect::<String>();
-                if header_text.contains("New date") {
-                    new_date_str = value.text().collect::<String>();
-                } else if header_text.contains("Original date") {
-                    original_date_str = value.text().collect::<String>();
-                } else if header_text.contains("Start time") {
-                    time_str = value.text().collect::<String>();
+        for selector in &selectors {
+            for row in document.select(selector) {
+                let header = row.select(&Selector::parse("th").unwrap()).next();
+                let value = row.select(&Selector::parse("td").unwrap()).next();
+                
+                if let (Some(header), Some(value)) = (header, value) {
+                    let header_text = header.text().collect::<String>();
+                    if header_text.contains("New date") {
+                        new_date_str = value.text().collect::<String>();
+                    } else if header_text.contains("Original date") {
+                        original_date_str = value.text().collect::<String>();
+                    } else if header_text.contains("Date") && new_date_str.is_empty() {
+                        new_date_str = value.text().collect::<String>();
+                    } else if header_text.contains("Start time") {
+                        time_str = value.text().collect::<String>();
+                    }
                 }
             }
         }
@@ -158,7 +174,8 @@ impl CupMatchParser {
         // Parse event start time
         let event_datetime_str = format!("{} {}", event_date_str, time_str);
         let event_start_time = DateTime::from_naive_utc_and_offset(
-            NaiveDateTime::parse_from_str(&event_datetime_str, "%A %d %B %Y %H:%M")?,
+            NaiveDateTime::parse_from_str(&event_datetime_str, "%A %d %B %Y %H:%M")
+                .or_else(|_| NaiveDateTime::parse_from_str(&event_datetime_str, "%A %-d %B %Y %H:%M"))?,
             Utc,
         );
 
@@ -166,7 +183,8 @@ impl CupMatchParser {
         let original_start_time = if !original_date_str.is_empty() && new_date_str != original_date_str {
             let original_datetime_str = format!("{} {}", original_date_str, time_str);
             Some(DateTime::from_naive_utc_and_offset(
-                NaiveDateTime::parse_from_str(&original_datetime_str, "%A %d %B %Y %H:%M")?,
+                NaiveDateTime::parse_from_str(&original_datetime_str, "%A %d %B %Y %H:%M")
+                    .or_else(|_| NaiveDateTime::parse_from_str(&original_datetime_str, "%A %-d %B %Y %H:%M"))?,
                 Utc,
             ))
         } else {
@@ -219,6 +237,16 @@ impl CupMatchParser {
             .next()
             .context("Failed to find result cell")?;
 
+        // Check if this is a game with an absent player or not played
+        let result_text = result_cell.text().collect::<String>();
+        if result_text.contains("absent player") {
+            let players = self.extract_players(&result_cell)?;
+            return Ok((players, "Away player absent".to_string()));
+        } else if result_text.contains("not played") || result_text.contains("void") {
+            let players = self.extract_players(&result_cell)?;
+            return Ok((players, "Not applicable".to_string()));
+        }
+
         let players = self.extract_players(&result_cell)?;
 
         let scores = game
@@ -241,15 +269,32 @@ impl CupMatchParser {
 
     fn extract_players(&self, cell: &scraper::ElementRef) -> Result<Players> {
         let player_selector = Selector::parse("a").unwrap();
-        let players = cell.select(&player_selector);
-
+        let all_players: Vec<_> = cell.select(&player_selector).collect();
         let text = cell.text().collect::<String>();
         let is_doubles = text.contains("&");
 
+        // Handle case where there's an absent player or game not played
+        if text.contains("absent player") {
+            let present_player = all_players.first().context("Failed to find present player")?;
+            return Ok(Players {
+                home_player1: present_player.text().collect(),
+                home_player2: None,
+                away_player1: "absent player".to_string(),
+                away_player2: None,
+            });
+        } else if text.contains("not played") || text.contains("void") {
+            if all_players.len() == 2 {
+                return Ok(Players {
+                    home_player1: all_players[0].text().collect(),
+                    home_player2: None,
+                    away_player1: all_players[1].text().collect(),
+                    away_player2: None,
+                });
+            }
+        }
+
         if is_doubles {
-            // Try both formats - individual links and combined links
-            let all_players: Vec<_> = players.collect();
-            
+            // Try both formats - individual links and combined links            
             if all_players.len() == 4 {
                 // Individual links for each player
                 Ok(Players {
@@ -280,7 +325,6 @@ impl CupMatchParser {
                 anyhow::bail!("Unexpected number of player links in doubles game")
             }
         } else {
-            let all_players: Vec<_> = players.collect();
             if all_players.len() == 2 {
                 Ok(Players {
                     home_player1: all_players[0].text().collect(),
@@ -289,8 +333,17 @@ impl CupMatchParser {
                     away_player2: None,
                 })
             } else {
+                println!("All players: {:?}", all_players);
                 anyhow::bail!("Unexpected number of player links in singles game")
             }
         }
+    }
+
+    fn extract_report_html(&self, document: &Html) -> Option<String> {
+        let report_selector = Selector::parse("#report-text").unwrap();
+        document
+            .select(&report_selector)
+            .next()
+            .map(|el| el.html())
     }
 } 

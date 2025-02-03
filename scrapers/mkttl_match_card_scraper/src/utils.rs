@@ -24,7 +24,15 @@ pub fn detect_match_type(document: &Html) -> Result<MatchType> {
         }
     };
 
-    if title.contains("Cup") {
+    // Also check the h2 tag
+    let h2_selector = Selector::parse("h2").unwrap();
+    let h2_text = document
+        .select(&h2_selector)
+        .next()
+        .map(|el| el.text().collect::<String>());
+
+    // If either the title or h2 contains "Cup", it's a cup match
+    if title.contains("Cup") || h2_text.map(|t| t.contains("Cup")).unwrap_or(false) {
         Ok(MatchType::MkttlChallengeCup)
     } else {
         Ok(MatchType::MkttlLeagueMatch)
