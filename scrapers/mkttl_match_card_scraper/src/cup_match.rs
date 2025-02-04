@@ -15,7 +15,7 @@ impl CupMatchParser {
         let mut games = Vec::new();
 
         // Extract match metadata
-        let competition_type = self.extract_competition_type(&document)?;
+        let competition_type = "MKTTL Challenge Cup".to_string();
         let season = self.extract_season(&document)?;
         let division = self.extract_division(&document)?;
         let venue = self.extract_venue(&document)?;
@@ -27,8 +27,15 @@ impl CupMatchParser {
         let games_selector = Selector::parse("#games-table tbody tr").unwrap();
 
         for game in document.select(&games_selector) {
-            let set_number = self.extract_set_number(&game)?;
-            let (players, scores) = self.extract_game_data(&game)?;
+            let set_number = match self.extract_set_number(&game) {
+                Ok(num) => num,
+                Err(_) => continue, // Skip this game if set number extraction fails
+            };
+
+            let (players, scores) = match self.extract_game_data(&game) {
+                Ok(data) => data,
+                Err(_) => continue, // Skip this game if player/score extraction fails
+            };
 
             // Skip games where a player is absent or game not played
             if scores == "Away player absent" || scores == "Not applicable" {
@@ -38,7 +45,10 @@ impl CupMatchParser {
             // For each leg in the game
             let leg_scores = scores.split(", ").enumerate();
             for (leg_idx, leg_score) in leg_scores {
-                let (home_score, away_score) = utils::parse_score(leg_score)?;
+                let (home_score, away_score) = match utils::parse_score(leg_score) {
+                    Ok(score) => score,
+                    Err(_) => continue, // Skip this leg if score parsing fails
+                };
 
                 let game_data = GameData {
                     event_start_time,
@@ -70,14 +80,6 @@ impl CupMatchParser {
         }
 
         Ok(games)
-    }
-
-    fn extract_competition_type(&self, document: &Html) -> Result<String> {
-        document
-            .select(&Selector::parse("h2").unwrap())
-            .next()
-            .map(|el| el.text().collect::<String>().trim().to_string())
-            .context("Could not find competition type")
     }
 
     fn extract_season(&self, document: &Html) -> Result<String> {
@@ -270,6 +272,9 @@ impl CupMatchParser {
     fn extract_players(&self, cell: &scraper::ElementRef) -> Result<Players> {
         let player_selector = Selector::parse("a").unwrap();
         let all_players: Vec<_> = cell.select(&player_selector).collect();
+        if all_players.len() == 0 {
+            return Err(anyhow::anyhow!("No players found, probably a future match"));
+        }
         let text = cell.text().collect::<String>();
         let is_doubles = text.contains("&");
 

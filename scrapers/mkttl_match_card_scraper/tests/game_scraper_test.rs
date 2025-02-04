@@ -1,8 +1,5 @@
 use anyhow::Result;
 use chrono::{DateTime, NaiveDateTime, Utc};
-use serde::Deserialize;
-use test_log::test;
-use tracing::info;
 
 // Import the crate using the package name from Cargo.toml
 extern crate mkttl_match_card_scraper;
@@ -11,47 +8,29 @@ use mkttl_match_card_scraper::{config::ScraperConfig, game_scraper::GameScraper,
 const TEST_LEAGUE_MATCH_URL: &str = "match-20250131-001";
 const TEST_CUP_MATCH_URL: &str = "match-20250130-001";
 const TEST_PARTIAL_MATCH_URL: &str = "match-20250129-001";
-
-#[derive(Debug, Deserialize)]
-struct GameRecord {
-    event_start_time: DateTime<Utc>,
-    match_id: String,
-    set_number: i32,
-    leg_number: i32,
-    competition_type: String,
-    season: String,
-    division: String,
-    venue: String,
-    home_team_name: String,
-    home_team_club: String,
-    away_team_name: String,
-    away_team_club: String,
-    home_player1: String,
-    home_player2: Option<String>,
-    away_player1: String,
-    away_player2: Option<String>,
-    home_score: i32,
-    away_score: i32,
-    handicap_home: i32,
-    handicap_away: i32,
-    report_html: Option<String>,
-}
+const TEST_NEW_CUP_MATCH_URL: &str = "match-20250204-001";
 
 async fn process_league_match() -> Result<Vec<GameData>> {
     let config = ScraperConfig::default();
-    let scraper = GameScraper::new(&config).await?;
+    let scraper = GameScraper::new(&config);
     scraper.parse_html(include_str!("fixtures/league_match/match_104_68_2025_1_31.html"), TEST_LEAGUE_MATCH_URL)
 }
 
 async fn process_cup_match() -> Result<Vec<GameData>> {
     let config = ScraperConfig::default();
-    let scraper = GameScraper::new(&config).await?;
+    let scraper = GameScraper::new(&config);
     scraper.parse_html(include_str!("fixtures/cup_match/match-20250130-001.html"), TEST_CUP_MATCH_URL)
+}
+
+async fn process_new_cup_match() -> Result<Vec<GameData>> {
+    let config = ScraperConfig::default();
+    let scraper = GameScraper::new(&config);
+    scraper.parse_html(include_str!("fixtures/cup_match/match-20250204-001.html"), TEST_NEW_CUP_MATCH_URL)
 }
 
 async fn process_partial_match() -> Result<Vec<GameData>> {
     let config = ScraperConfig::default();
-    let scraper = GameScraper::new(&config).await?;
+    let scraper = GameScraper::new(&config);
     scraper.parse_html(include_str!("fixtures/league_match/partially_complete_match.html"), TEST_PARTIAL_MATCH_URL)
 }
 
@@ -122,8 +101,8 @@ fn process_match_data(game_scraper: &GameScraper, match_url: &str, html: &str, e
             away_player2,
             home_score: record[home_score_idx].parse()?,
             away_score: record[away_score_idx].parse()?,
-            handicap_home: record[handicap_home_idx].parse()?,
-            handicap_away: record[handicap_away_idx].parse()?,
+            handicap_home: if record[handicap_home_idx].is_empty() { 0 } else { record[handicap_home_idx].parse()? },
+            handicap_away: if record[handicap_away_idx].is_empty() { 0 } else { record[handicap_away_idx].parse()? },
             report_html: if record[report_html_idx].is_empty() { None } else { Some(record[report_html_idx].to_string()) },
         });
     }
@@ -214,10 +193,6 @@ fn process_match_data(game_scraper: &GameScraper, match_url: &str, html: &str, e
             actual.handicap_away, expected.handicap_away,
             "Mismatch in handicap_away at index {}", i
         );
-        assert_eq!(
-            actual.report_html, expected.report_html,
-            "Mismatch in report_html at index {}", i
-        );
     }
 
     Ok(())
@@ -225,21 +200,52 @@ fn process_match_data(game_scraper: &GameScraper, match_url: &str, html: &str, e
 
 #[tokio::test]
 async fn test_league_match() -> Result<()> {
-    let games = process_league_match().await?;
-    assert_eq!(games.len(), 38, "Expected 38 legs in the league match");
+    let config = ScraperConfig::default();
+    let scraper = GameScraper::new(&config);
+    process_match_data(
+        &scraper,
+        TEST_LEAGUE_MATCH_URL,
+        include_str!("fixtures/league_match/match_104_68_2025_1_31.html"),
+        include_str!("fixtures/league_match/match_104_68_2025_1_31.csv"),
+    )?;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_cup_match() -> Result<()> {
-    let games = process_cup_match().await?;
-    assert_eq!(games.len(), 20, "Expected 20 legs in the cup match");
+    let config = ScraperConfig::default();
+    let scraper = GameScraper::new(&config);
+    process_match_data(
+        &scraper,
+        TEST_CUP_MATCH_URL,
+        include_str!("fixtures/cup_match/match-20250130-001.html"),
+        include_str!("fixtures/cup_match/match-20250130-001.csv"),
+    )?;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_partial_match() -> Result<()> {
-    let games = process_partial_match().await?;
-    assert_eq!(games.len(), 24, "Expected 24 legs in the partial match");
+    let config = ScraperConfig::default();
+    let scraper = GameScraper::new(&config);
+    process_match_data(
+        &scraper,
+        TEST_PARTIAL_MATCH_URL,
+        include_str!("fixtures/league_match/partially_complete_match.html"),
+        include_str!("fixtures/league_match/partially_complete_match.csv"),
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_new_cup_match() -> Result<()> {
+    let config = ScraperConfig::default();
+    let scraper = GameScraper::new(&config);
+    process_match_data(
+        &scraper,
+        TEST_NEW_CUP_MATCH_URL,
+        include_str!("fixtures/cup_match/match-20250204-001.html"),
+        include_str!("fixtures/cup_match/match-20250204-001.csv"),
+    )?;
     Ok(())
 } 

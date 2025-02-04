@@ -14,8 +14,9 @@ impl LeagueMatchParser {
         let document = Html::parse_document(html);
         let mut games = Vec::new();
 
+        let competition_type = "MKTTL League".to_string();
+
         // Extract match metadata
-        let competition_type = self.extract_competition_type(&document)?;
         let season = self.extract_season(&document)?;
         let division = self.extract_division(&document)?;
         let venue = self.extract_venue(&document)?;
@@ -76,14 +77,6 @@ impl LeagueMatchParser {
         }
 
         Ok(games)
-    }
-
-    fn extract_competition_type(&self, document: &Html) -> Result<String> {
-        document
-            .select(&Selector::parse("h2").unwrap())
-            .next()
-            .map(|el| el.text().collect::<String>().trim().to_string())
-            .context("Could not find competition type")
     }
 
     fn extract_season(&self, document: &Html) -> Result<String> {

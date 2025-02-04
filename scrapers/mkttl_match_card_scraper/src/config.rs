@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::env;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuestDbConfig {
     pub host: String,
     pub port: u16,
@@ -16,7 +16,7 @@ impl Default for QuestDbConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RateLimits {
     pub requests_per_second: u32,
 }
@@ -29,7 +29,7 @@ impl Default for RateLimits {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScrapingConfig {
     pub user_agent: String,
     pub request_timeout_secs: u64,
@@ -44,7 +44,7 @@ impl Default for ScrapingConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScraperConfig {
     pub questdb: QuestDbConfig,
     pub rate_limits: RateLimits,
@@ -52,14 +52,6 @@ pub struct ScraperConfig {
 }
 
 impl ScraperConfig {
-    pub fn get_questdb_url(&self) -> String {
-        format!("http://{}:{}/exec?query=", self.questdb.host, self.questdb.port)
-    }
-
-    pub fn get_questdb_ingester_url(&self) -> String {
-        format!("{}:{}", self.questdb.host, self.questdb.port)
-    }
-
     pub fn from_env() -> Self {
         let mut config = Self::default();
 

@@ -1,9 +1,9 @@
 use anyhow::Result;
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, Mutex},
 };
-use mkttl_match_card_scraper::{config::ScraperConfig};
+use mkttl_match_card_scraper::config::ScraperConfig;
 use tokio::{fs, task};
 use indicatif::{ProgressBar, ProgressStyle};
 use clap::Parser;
@@ -16,7 +16,7 @@ struct Cli {
     limit: Option<usize>,
 
     /// Number of parallel tasks
-    #[arg(short, long, default_value = "4")]
+    #[arg(short, long, default_value = "24")]
     parallel: usize,
 }
 
@@ -30,10 +30,15 @@ impl FileProcessor {
 
     async fn process_file(&self, path: &Path, config: &ScraperConfig) -> Result<()> {
         let html = fs::read_to_string(path).await?;
-        let scraper = mkttl_match_card_scraper::game_scraper::GameScraper::new(config).await?;
+        let scraper = mkttl_match_card_scraper::game_scraper::GameScraper::new(config);
         let games = scraper.parse_html(&html, path.to_str().unwrap_or_default())?;
 
-        // Generate output path that mirrors the input structure
+        // Skip if no games were found (e.g., future matches)
+        if games.is_empty() {
+            return Ok(());
+        }
+
+        // Only create output directories and CSV file if we have games to write
         let relative_path = path.strip_prefix("html_files").unwrap_or(path);
         let output_path = Path::new("parsed_html_output").join(relative_path);
         if let Some(parent) = output_path.parent() {
@@ -41,10 +46,8 @@ impl FileProcessor {
         }
         let csv_path = output_path.with_extension("csv");
 
-        // Write CSV
+        // Create CSV writer and write header
         let mut wtr = csv::Writer::from_path(&csv_path)?;
-
-        // Write header
         wtr.write_record(&[
             "event_start_time",
             "match_id",

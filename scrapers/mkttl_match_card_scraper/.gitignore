@@ -4,3 +4,5 @@ html_files/
 parsed_html_output/
 **/.DS_Store
 .DS_Store
+scraper.log
+scraper.error.log

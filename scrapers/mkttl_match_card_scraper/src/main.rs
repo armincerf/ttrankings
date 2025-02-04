@@ -11,7 +11,7 @@ use std::{
     path::Path,
     fs,
 };
-use tracing::{error, info};
+use tracing::info;
 use clap::{Parser, Subcommand};
 use csv;
 
@@ -56,14 +56,14 @@ impl FileProcessor {
         let html = fs::read_to_string(path)?;
         info!("Processing cup_match match: {:?}", path);
 
-        // Create a match record from the HTML
-        let record = MatchRecord {
-            raw_html: html.clone(),
-        };
-
         // Process the match using the appropriate scraper
-        let scraper = GameScraper::new(config).await?;
-        let mut games = scraper.parse_html(&html, path.to_str().unwrap_or_default())?;
+        let scraper = GameScraper::new(config);
+        let games = scraper.parse_html(&html, path.to_str().unwrap_or_default())?;
+
+        // Skip if no games data (unplayed match)
+        if games.is_empty() {
+            return Ok(());
+        }
 
         // Generate output path that mirrors the input structure
         let relative_path = path.strip_prefix("html_files").unwrap_or(path);
@@ -132,11 +132,6 @@ impl FileProcessor {
         wtr.flush()?;
         Ok(())
     }
-}
-
-#[derive(Debug)]
-struct MatchRecord {
-    raw_html: String,
 }
 
 fn main() -> Result<()> {

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mkttl.scraper</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/alexdavis/ghq/github.com/armincerf/ttrankings/target/release/scheduled_scraper</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/alexdavis/ghq/github.com/armincerf/ttrankings/scrapers/mkttl_match_card_scraper/scraper.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/alexdavis/ghq/github.com/armincerf/ttrankings/scrapers/mkttl_match_card_scraper/scraper.error.log</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/alexdavis/ghq/github.com/armincerf/ttrankings/scrapers/mkttl_match_card_scraper</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>QUESTDB_HOST</key>
+        <string>localhost</string>
+        <key>QUESTDB_PORT</key>
+        <string>9000</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist> 

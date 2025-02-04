@@ -35,25 +35,8 @@ pub struct Players {
     pub away_player2: Option<String>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum MatchType {
     MkttlLeagueMatch,
     MkttlChallengeCup,
 }
-
-pub const KNOWN_CLUBS: &[&str] = &[
-    "Chackmore",
-    "Great Brickhill",
-    "Greenleys",
-    "Leighton Buzzard",
-    "Little Horwood",
-    "Milton Keynes",
-    "Mursley",
-    "Newport Pagnell",
-    "Open University",
-    "Padbury Sports Pavilion",
-    "Padbury",
-    "Shenley Wood",
-    "Stony Stratford Cricket Club",
-    "Stony Stratford Lawn Tennis Club",
-    "Woburn Sands",
-]; 

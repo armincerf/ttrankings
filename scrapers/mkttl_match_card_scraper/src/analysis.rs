@@ -2,7 +2,6 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sqlx::postgres::{PgPool, PgPoolOptions};
-use sqlx::{Postgres, Row}; // `Row` may be removed if you truly don't need it
 use std::fmt;
 
 const DB_CONNECTION: &str = "postgres://admin:quest@localhost:8812/qdb?sslmode=disable";

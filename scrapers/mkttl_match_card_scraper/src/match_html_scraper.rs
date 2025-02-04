@@ -1,15 +1,9 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
-use governor::{
-    clock::DefaultClock,
-    state::{InMemoryState, NotKeyed},
-    Quota, RateLimiter,
-};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
     fs,
-    num::NonZeroU32,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
@@ -19,103 +13,69 @@ use tracing::{error, info};
 use serde_json;
 use regex;
 use scraper;
+use html_escape;
+use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::config::ScraperConfig;
 
-const CONCURRENT_REQUESTS: u32 = 4;
-const MAX_RETRIES: u32 = 2;
-const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
-const HTML_FILES_DIR: &str = "html_files";
-const URLS_FILE: &str = "html_files/urls.txt";
-const STATE_FILE: &str = "html_files/state.json";
-const CACHE_DIR: &str = "html_files/cache";
-const INITIAL_PAGE_SIZE: u32 = 3;
-const SUBSEQUENT_PAGE_SIZE: u32 = 200;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct UrlState {
-    last_checked: DateTime<Utc>,
-    last_modified: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ScraperState {
-    urls: HashMap<String, UrlState>,
-    last_run: DateTime<Utc>,
-    is_initial_run: bool,
-}
-
-impl Default for ScraperState {
-    fn default() -> Self {
-        Self {
-            urls: HashMap::new(),
-            last_run: Utc::now(),
-            is_initial_run: true,
-        }
-    }
-}
+const HTML_FILES_DIR: &str = "/Users/alexdavis/ghq/github.com/armincerf/ttrankings/scrapers/mkttl_match_card_scraper/html_files";
+const URLS_FILE: &str = "/Users/alexdavis/ghq/github.com/armincerf/ttrankings/scrapers/mkttl_match_card_scraper/html_files/urls.txt";
+const CACHE_DIR: &str = "/Users/alexdavis/ghq/github.com/armincerf/ttrankings/scrapers/mkttl_match_card_scraper/html_files/cache";
+const LAST_RUN_FILE: &str = "/Users/alexdavis/ghq/github.com/armincerf/ttrankings/scrapers/mkttl_match_card_scraper/html_files/last_run";
+const PAGE_SIZE: u32 = 100;
+const CONCURRENT_REQUESTS: usize = 4;
+const MAX_RETRIES: u32 = 3;
+const INITIAL_RETRY_DELAY: u64 = 1000;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MatchHtmlStats {
-    pub requests_per_second: f64,
     pub total_matches_processed: u64,
     pub total_matches_to_process: usize,
     pub latest_update: Option<DateTime<Utc>>,
     pub status: String,
     pub total_match_urls: usize,
+    pub errors: Vec<String>,
 }
 
-pub struct MatchHtmlScraper {
-    client: reqwest::blocking::Client,
-    rate_limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
-    stats: Arc<Mutex<MatchHtmlStats>>,
-    state: ScraperState,
-}
-
-impl MatchHtmlScraper {
-    pub fn new(config: ScraperConfig) -> Result<Self> {
-        let client = reqwest::blocking::Client::builder()
-            .user_agent(&config.scraping.user_agent)
-            .timeout(Duration::from_secs(config.scraping.request_timeout_secs))
-            .build()
-            .context("Failed to create HTTP client")?;
-
-        let stats = Arc::new(Mutex::new(MatchHtmlStats {
-            requests_per_second: 0.0,
+impl Default for MatchHtmlStats {
+    fn default() -> Self {
+        Self {
             total_matches_processed: 0,
             total_matches_to_process: 0,
             latest_update: None,
             status: "Initializing".to_string(),
             total_match_urls: 0,
-        }));
+            errors: Vec::new(),
+        }
+    }
+}
 
-        let quota = Quota::per_second(
-            NonZeroU32::new(config.rate_limits.requests_per_second)
-                .ok_or_else(|| anyhow!("Invalid requests_per_second value"))?,
-        );
-        let rate_limiter = Arc::new(RateLimiter::direct(quota));
+pub struct MatchHtmlScraper {
+    client: reqwest::blocking::Client,
+    stats: Arc<Mutex<MatchHtmlStats>>,
+    script_start_time: DateTime<Utc>,
+    progress_bar: Option<ProgressBar>,
+}
 
-        // Load state from file or create new
-        let state = if Path::new(STATE_FILE).exists() {
-            let state_json = fs::read_to_string(STATE_FILE)?;
-            serde_json::from_str(&state_json).unwrap_or_default()
-        } else {
-            ScraperState::default()
-        };
+impl MatchHtmlScraper {
+    pub fn new(_config: ScraperConfig) -> Result<Self> {
+        let client = reqwest::blocking::Client::new();
+        let stats = Arc::new(Mutex::new(MatchHtmlStats::default()));
+        let script_start_time = Utc::now();
 
         Ok(Self {
             client,
-            rate_limiter,
             stats,
-            state,
+            script_start_time,
+            progress_bar: None,
         })
     }
 
-    fn save_state(&self) -> Result<()> {
-        fs::create_dir_all(HTML_FILES_DIR)?;
-        let state_json = serde_json::to_string_pretty(&self.state)?;
-        fs::write(STATE_FILE, state_json)?;
-        Ok(())
+    pub fn with_date(mut self, date_str: &str) -> Result<Self> {
+        // Parse date string in format DD/MM/YYYY
+        let dt = chrono::NaiveDateTime::parse_from_str(&format!("{} 00:00:00", date_str), "%d/%m/%Y %H:%M:%S")?;
+        self.script_start_time = dt.and_utc();
+        Ok(self)
     }
 
     fn validate_html(html: &str) -> bool {
@@ -130,32 +90,9 @@ impl MatchHtmlScraper {
         false
     }
 
-    fn retry_with_backoff<F, T>(mut operation: F) -> Result<T>
-    where
-        F: FnMut() -> Result<T>,
-    {
-        let mut delay = INITIAL_RETRY_DELAY;
-        let mut attempt = 1;
-
-        loop {
-            match operation() {
-                Ok(value) => return Ok(value),
-                Err(e) => {
-                    if attempt >= MAX_RETRIES {
-                        return Err(e.context("Max retries exceeded"));
-                    }
-                    info!("Retry attempt {} after error: {}", attempt, e);
-                    thread::sleep(delay);
-                    delay *= 2;
-                    attempt += 1;
-                }
-            }
-        }
-    }
-
     fn url_to_filepath(url: &str) -> PathBuf {
         // Extract just the numeric parts of the URL
-        let re = regex::Regex::new(r"/matches/team/(\d+/\d+/\d+/\d+/\d+)").unwrap();
+        let re = regex::Regex::new(r"/matches/team/([^/]+/[^/]+/[^/]+/[^/]+/[^/]+)").unwrap();
         let safe_filename = if let Some(cap) = re.captures(url) {
             cap[1].replace('/', "_")
         } else {
@@ -179,39 +116,20 @@ impl MatchHtmlScraper {
         Path::new(CACHE_DIR).join(format!("records_{}_to_{}.json", start_record, end_record))
     }
 
-    fn query_event_viewer(&self, start: u32, length: u32, total_records: Option<u32>) -> Result<serde_json::Value> {
-        info!("Querying event viewer API (start: {}, length: {})", start, length);
-        
+    fn query_event_viewer(&self, start: u32, length: u32) -> Result<serde_json::Value> {
         // Create cache directory if it doesn't exist
         fs::create_dir_all(CACHE_DIR)?;
         
         // Calculate the record range for this request
-        // Since records are returned newest first:
-        // - start=0, length=200 means records total-0-(200-1) to total-0 (newest)
-        // - start=200, length=200 means records total-200-(200-1) to total-200
-        // - and so on until we reach 0
-        let end_record = if let Some(total) = total_records {
-            total - start
-        } else {
-            0 // Will be updated after API call
-        };
+        let end_record = start + length;
         
-        let start_record = if end_record >= length {
-            end_record - length
-        } else {
-            0
-        };
+        let cache_path = Self::get_cache_path(start, end_record);
         
-        let cache_path = Self::get_cache_path(start_record, end_record);
-        
-        // Try to read from cache first
-        if cache_path.exists() {
-            info!("Found cached response for records {} to {}", start_record, end_record);
+        // Try to read from cache first if length greater than 1
+        if cache_path.exists() && length > 1 {
             let cached_json = fs::read_to_string(&cache_path)?;
             return Ok(serde_json::from_str(&cached_json)?);
         }
-
-        info!("Fetching records {} to {} from API", start_record, end_record);
 
         // If not in cache, query the API
         let query_url = "https://www.mkttl.co.uk/event-viewer/load.js";
@@ -245,7 +163,7 @@ impl MatchHtmlScraper {
                 "columns[3][search][value]": "",
                 "columns[3][search][regex]": "false",
                 "order[0][column]": "1",
-                "order[0][dir]": "desc",
+                "order[0][dir]": "asc",
                 "order[0][name]": "me.log_updated",
                 "start": start,
                 "length": length,
@@ -261,72 +179,40 @@ impl MatchHtmlScraper {
         }
 
         let text = response.text()?;
-        info!("Got response from event viewer API ({} bytes)", text.len());
         
         let json: serde_json::Value = serde_json::from_str(&text)?;
         
-        // If we don't have total_records, get it from the response
-        let total_records = total_records.unwrap_or_else(|| {
-            json.get("recordsTotal")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u32)
-                .unwrap_or(0)
-        });
+        info!("API Response - recordsTotal: {}, recordsFiltered: {}, start: {}, length: {}", 
+            json.get("recordsTotal").and_then(|v| v.as_u64()).unwrap_or(0),
+            json.get("recordsFiltered").and_then(|v| v.as_u64()).unwrap_or(0),
+            start,
+            length
+        );
         
-        // Now we can calculate the actual record range
-        let end_record = total_records - start;
-        let start_record = if end_record >= length {
-            end_record - length
-        } else {
-            0
-        };
-        
-        // Cache the response with the correct record range
-        let cache_path = Self::get_cache_path(start_record, end_record);
+        // Cache the response
         fs::write(&cache_path, serde_json::to_string_pretty(&json)?)?;
-        info!("Cached API response to {:?} (records {} to {})", cache_path, start_record, end_record);
         
         Ok(json)
     }
 
     fn process_api_response(&self, json: serde_json::Value) -> Result<Vec<(String, DateTime<Utc>)>> {
         let mut new_urls = Vec::new();
+        let url_regex = regex::Regex::new(r#"https://www\.mkttl\.co\.uk/matches/team/[^/'"]+/[^/'"]+/[^/'"]+/[^/'"]+/[^/'"<>]+"#)
+            .expect("Failed to compile regex to match team URLs");
 
         if let Some(data) = json.get("data") {
             if let Some(array) = data.as_array() {
                 for item in array {
-                    if let (Some(description), Some(timestamp_str)) = (item.get(3), item.get(1)) {
-                        if let (Some(desc_str), Some(ts_str)) = (description.as_str(), timestamp_str.as_str()) {
-                            let mut search_start = 0;
-                            while let Some(start) = desc_str[search_start..].find("/matches/team/") {
-                                let start = search_start + start;
-                                if let Some(end) = desc_str[start..].find("\"") {
-                                    let url = format!("https://www.mkttl.co.uk{}", &desc_str[start..start + end]);
-                                    let filepath = Self::url_to_filepath(&url);
-                                    
-                                    if let Some(last_modified) = Self::parse_last_modified(ts_str) {
-                                        let needs_update = if let Some(state) = self.state.urls.get(&url) {
-                                            last_modified > state.last_modified
-                                        } else {
-                                            true
-                                        };
+                    let desc_str = item.get(3).and_then(|v| v.as_str()).unwrap_or("");
+                    let ts_str = item.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                    let decoded_desc = html_escape::decode_html_entities(desc_str);
 
-                                        // Only add URL if file doesn't exist or needs update
-                                        if needs_update && (!filepath.exists() || {
-                                            // If file exists but is empty or corrupted, redownload
-                                            if let Ok(metadata) = filepath.metadata() {
-                                                metadata.len() == 0
-                                            } else {
-                                                true
-                                            }
-                                        }) {
-                                            new_urls.push((url.clone(), last_modified));
-                                        }
-                                    }
-                                    search_start = start + end;
-                                } else {
-                                    break;
-                                }
+                    // Only process URLs that contain "2025"
+                    if decoded_desc.contains("/2025/") {
+                        if let Some(last_modified) = Self::parse_last_modified(ts_str) {
+                            for cap in url_regex.find_iter(&decoded_desc) {
+                                let url = cap.as_str().to_string();
+                                new_urls.push((url.clone(), last_modified));
                             }
                         }
                     }
@@ -337,101 +223,151 @@ impl MatchHtmlScraper {
         Ok(new_urls)
     }
 
-    fn gather_urls(&mut self) -> Result<Vec<String>> {
-        info!("Gathering match URLs from event viewer API");
-        let mut stats = self.stats.lock().unwrap();
-        stats.status = "Querying event viewer API for match URLs...".to_string();
+    fn get_last_run_time() -> Option<DateTime<Utc>> {
+        if let Ok(content) = fs::read_to_string(LAST_RUN_FILE) {
+            if let Ok(timestamp) = content.parse::<i64>() {
+                return Some(DateTime::from_timestamp(timestamp, 0).unwrap());
+            }
+        }
+        None
+    }
 
+    fn update_last_run_time(&self) -> Result<()> {
         fs::create_dir_all(HTML_FILES_DIR)?;
+        fs::write(LAST_RUN_FILE, self.script_start_time.timestamp().to_string())?;
+        Ok(())
+    }
 
+    fn gather_urls(&mut self) -> Result<()> {
         let mut all_new_urls = Vec::new();
-        let mut start = 0;
-        let page_size = SUBSEQUENT_PAGE_SIZE;
-        info!("Using page size of {}", page_size);
+        fs::create_dir_all(HTML_FILES_DIR)?;
+        fs::create_dir_all(CACHE_DIR)?;
 
-        // Get total records from first request
-        let json = self.query_event_viewer(0, 1, None)?;
-        let total_records = json.get("recordsTotal")
+        // First query to get current total records
+        let initial_response = self.query_event_viewer(0, 1)?;
+        let current_total_records = initial_response
+            .get("recordsTotal")
             .and_then(|v| v.as_u64())
             .map(|v| v as u32)
-            .ok_or_else(|| anyhow!("Failed to get total records"))?;
-        
-        info!("Total records available: {} (expecting {} pages)", 
-              total_records, 
-              (total_records as f64 / page_size as f64).ceil());
+            .ok_or_else(|| anyhow!("Failed to get total records count"))?;
 
-        let mut page_number = 1;
-        loop {
-            info!("Fetching page {} (offset: {}, page size: {})", page_number, start, page_size);
-            // Query the API with total_records
-            let json = self.query_event_viewer(start, page_size, Some(total_records))?;
+        info!("Initial query shows total records: {}", current_total_records);
 
-            // Process the response
-            let new_urls = self.process_api_response(json)?;
-            let new_urls_count = new_urls.len();
-            info!("Found {} new/updated URLs on page {}", new_urls_count, page_number);
-            
-            // Update state and collect URLs
-            for (url, last_modified) in new_urls {
-                let is_new = !self.state.urls.contains_key(&url);
-                self.state.urls.insert(url.clone(), UrlState {
-                    last_checked: Utc::now(),
-                    last_modified,
-                });
-                all_new_urls.push(url.clone());
-                
-                if is_new {
-                    info!("New match found: {} (modified: {})", url, last_modified);
-                } else {
-                    info!("Updated match found: {} (modified: {})", url, last_modified);
+        // First collect all existing cache files and their ranges
+        let mut cached_ranges = Vec::new();
+        if let Ok(entries) = fs::read_dir(CACHE_DIR) {
+            for entry in entries.filter_map(Result::ok) {
+                if let Some(filename) = entry.file_name().to_str() {
+                    if let Some(captures) = regex::Regex::new(r"records_(\d+)_to_(\d+)\.json")?.captures(filename) {
+                        if let (Some(start), Some(end)) = (captures.get(1), captures.get(2)) {
+                            if let (Ok(start_record), Ok(end_record)) = (start.as_str().parse::<u32>(), end.as_str().parse::<u32>()) {
+                                // Verify the cache file has valid content
+                                let cache_path = entry.path();
+                                if let Ok(content) = fs::read_to_string(&cache_path) {
+                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                                        if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
+                                            if !data.is_empty() {
+                                                cached_ranges.push((start_record, end_record));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
+        }
 
-            start += page_size;
-            page_number += 1;
+        // Sort ranges by start record
+        cached_ranges.sort_by_key(|&(start, _)| start);
 
-            // Check if we've processed all records
-            if start >= total_records {
-                info!("Reached end of available records after {} pages", page_number - 1);
-                break;
+        // Merge overlapping ranges
+        let mut merged_ranges = Vec::new();
+        if !cached_ranges.is_empty() {
+            let mut current_range = cached_ranges[0];
+            for &(start, end) in cached_ranges.iter().skip(1) {
+                if start <= current_range.1 {  // If ranges overlap
+                    // Merge them by taking the maximum end point
+                    current_range.1 = end.max(current_range.1);
+                } else if start == current_range.1 + 1 {  // If ranges are consecutive
+                    // Extend the current range
+                    current_range.1 = end;
+                } else {
+                    // Gap found, push current range and start new one
+                    merged_ranges.push(current_range);
+                    current_range = (start, end);
+                }
             }
-            info!("Progress: processed {}/{} records ({}%)", 
-                  start.min(total_records), 
-                  total_records,
-                  (start.min(total_records) as f64 / total_records as f64 * 100.0) as u32);
+            // Don't forget to push the last range
+            merged_ranges.push(current_range);
+        }
 
-            // Rate limiting
-            thread::sleep(Duration::from_millis(100));
-            
-            // Save state periodically (every 5 pages)
-            if page_number % 5 == 0 {
-                info!("Saving state after {} pages (found {} URLs so far)", 
-                      page_number, all_new_urls.len());
-                self.save_state()?;
+        // Find gaps in the merged ranges
+        let mut current_position = 0;
+        let mut ranges_to_fetch = Vec::new();
+
+        for (start, end) in merged_ranges {
+            if current_position < start {
+                ranges_to_fetch.push((current_position, start));
+            }
+            current_position = end;
+        }
+
+        // Add final range if needed
+        if current_position < current_total_records {
+            ranges_to_fetch.push((current_position, current_total_records));
+        }
+
+        if ranges_to_fetch.is_empty() {
+            info!("No new event logs to process");
+            return Ok(());
+        }
+
+        let total_records_to_fetch: u32 = ranges_to_fetch.iter().map(|(start, end)| end - start).sum();
+        info!("Found {} ranges to fetch, total records: {}", ranges_to_fetch.len(), total_records_to_fetch);
+        let total_pages = ((total_records_to_fetch as f64) / (PAGE_SIZE as f64)).ceil() as u64;
+        
+        let progress = ProgressBar::new(total_pages);
+        progress.set_style(ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} pages processed ({eta})")
+            .unwrap());
+        progress.enable_steady_tick(Duration::from_millis(100));
+
+        // Fetch each range in PAGE_SIZE chunks
+        for (range_start, range_end) in ranges_to_fetch {
+            let mut start = range_start;
+            while start < range_end {
+                let length = PAGE_SIZE.min(range_end - start);
+                
+                let response = self.query_event_viewer(start, length)?;
+                let new_urls = self.process_api_response(response)?;
+                for (url, _) in new_urls {
+                    if !all_new_urls.contains(&url) {
+                        all_new_urls.push(url.clone());
+                    }
+                }
+                
+                start += length;
+                progress.inc(1);
             }
         }
 
-        info!("Found {} new match URLs to process", all_new_urls.len());
-        stats.total_matches_to_process = all_new_urls.len();
-        stats.status = format!("Found {} URLs to process", all_new_urls.len());
+        progress.finish_and_clear();
 
-        // Write URLs to file
-        fs::write(URLS_FILE, all_new_urls.join("\n"))?;
-        info!("Wrote {} URLs to {}", all_new_urls.len(), URLS_FILE);
-
-        // Update state
-        if self.state.is_initial_run {
-            info!("Completed initial run - setting is_initial_run to false");
-            self.state.is_initial_run = false;
+        let total_urls = all_new_urls.len();
+        if total_urls > 0 {
+            info!("Processing {} URLs from new event logs", total_urls);
+            fs::write(URLS_FILE, all_new_urls.join("\n"))?;
+            self.process_urls(all_new_urls)?;
+        } else {
+            info!("No new URLs found in event logs");
         }
-        self.save_state()?;
 
-        Ok(all_new_urls)
+        Ok(())
     }
 
     fn validate_cache_coverage(&self) -> Result<()> {
-        info!("Validating cache coverage...");
-        
         // Get all cache files
         let cache_files = fs::read_dir(CACHE_DIR)?
             .filter_map(|entry| entry.ok())
@@ -443,8 +379,6 @@ impl MatchHtmlScraper {
             })
             .collect::<Vec<_>>();
             
-        info!("Found {} cache files", cache_files.len());
-        
         // Collect all unique match URLs from cache files
         let mut unique_urls = std::collections::HashSet::new();
         let mut total_records = 0;
@@ -470,9 +404,6 @@ impl MatchHtmlScraper {
             }
         }
         
-        info!("Found {} total records in cache", total_records);
-        info!("Found {} unique match URLs in cache", unique_urls.len());
-        
         // Get all HTML files
         let html_files = fs::read_dir(HTML_FILES_DIR)?
             .filter_map(|entry| entry.ok())
@@ -484,8 +415,6 @@ impl MatchHtmlScraper {
             })
             .collect::<Vec<_>>();
             
-        info!("Found {} HTML files", html_files.len());
-        
         // Check for missing files
         let mut missing_files = Vec::new();
         for url in &unique_urls {
@@ -515,157 +444,151 @@ impl MatchHtmlScraper {
         
         // Report results
         if missing_files.is_empty() && orphaned_files.is_empty() {
-            info!("Cache validation successful! All files are present and accounted for.");
+            info!("Cache validation successful: {} records, {} unique URLs", total_records, unique_urls.len());
         } else {
-            if !missing_files.is_empty() {
-                info!("Found {} missing HTML files:", missing_files.len());
-                for url in missing_files {
-                    info!("Missing: {}", url);
-                }
-            }
-            if !orphaned_files.is_empty() {
-                info!("Found {} orphaned HTML files (no corresponding URL in cache):", orphaned_files.len());
-                for file in orphaned_files {
-                    info!("Orphaned: {}", file);
-                }
-            }
+            info!("Cache validation found {} missing and {} orphaned files", missing_files.len(), orphaned_files.len());
         }
         
         Ok(())
     }
 
-    pub fn run(&mut self, limit: Option<usize>) -> Result<()> {
-        info!("Starting HTML scraper");
+    fn retry_with_backoff<T, F>(mut f: F) -> Result<T>
+    where
+        F: FnMut() -> Result<T>,
+    {
+        let mut retries = 0;
+        let mut delay = INITIAL_RETRY_DELAY;
 
-        // Step 1: Gather URLs that need updating
-        let mut urls = self.gather_urls()?;
-        
-        // Validate cache coverage
-        self.validate_cache_coverage()?;
-        
-        // Apply limit if specified
-        if let Some(limit) = limit {
-            urls.truncate(limit);
-            info!("Limited to processing {} URLs", limit);
+        loop {
+            match f() {
+                Ok(value) => return Ok(value),
+                Err(e) => {
+                    if retries >= MAX_RETRIES {
+                        return Err(e);
+                    }
+                    thread::sleep(Duration::from_millis(delay));
+                    delay *= 2;
+                    retries += 1;
+                }
+            }
         }
+    }
 
-        // Step 2: Process URLs with workers
-        let queue = Arc::new(Mutex::new(VecDeque::from(urls)));
-        info!("Starting {} concurrent workers", CONCURRENT_REQUESTS);
+    fn process_urls(&mut self, urls: Vec<String>) -> Result<()> {
+        let queue: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::from(urls)));
+        let progress = ProgressBar::new(queue.lock().unwrap().len() as u64);
+        progress.set_style(ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} URLs processed ({eta})")
+            .unwrap());
 
         let mut handles = Vec::new();
-        for i in 0..CONCURRENT_REQUESTS {
+        
+        for _ in 0..CONCURRENT_REQUESTS {
             let queue = Arc::clone(&queue);
-            let rate_limiter = Arc::clone(&self.rate_limiter);
             let client = self.client.clone();
             let stats = Arc::clone(&self.stats);
+            let progress = progress.clone();
 
             let handle = thread::spawn(move || -> Result<()> {
-                info!("Worker {} started", i);
                 while let Some(url) = {
                     let mut queue = queue.lock().unwrap();
                     queue.pop_front()
                 } {
-                    info!("Worker {} processing URL: {}", i, url);
                     let filepath = Self::url_to_filepath(&url);
-
-                    {
-                        let mut stats = stats.lock().unwrap();
-                        stats.status = format!("Worker {} processing URL: {}", i, url);
-                    }
-
-                    // Wait for rate limiter
-                    while let Err(_) = rate_limiter.check() {
-                        thread::sleep(Duration::from_millis(100));
-                    }
-
                     let result = Self::retry_with_backoff(|| {
-                        info!("Worker {} fetching HTML from {}", i, url);
                         let response = client.get(&url).send()?;
-
-                        if !response.status().is_success() {
-                            anyhow::bail!("Failed to fetch HTML: HTTP {}", response.status());
-                        }
-
                         let html = response.text()?;
-                        info!(
-                            "Worker {} successfully downloaded HTML ({} bytes) for {}",
-                            i,
-                            html.len(),
-                            url
-                        );
-
-                        // Validate HTML
-                        if !Self::validate_html(&html) {
-                            anyhow::bail!("Invalid HTML - missing League or Challenge Cup h2 element");
+                        if Self::validate_html(&html) {
+                            fs::create_dir_all(HTML_FILES_DIR)?;
+                            fs::write(&filepath, html)?;
+                            Ok(())
+                        } else {
+                            Err(anyhow!("Invalid HTML content"))
                         }
-                        info!("Worker {} successfully validated HTML for {}", i, url);
-
-                        // Write HTML to file
-                        fs::write(&filepath, html)?;
-                        info!("Worker {} wrote HTML to {:?}", i, filepath);
-
-                        Ok(())
                     });
 
                     match result {
                         Ok(_) => {
-                            info!("Worker {} successfully processed {}", i, url);
-                            let mut stats = stats.lock().unwrap();
-                            stats.total_matches_processed += 1;
-                            stats.latest_update = Some(Utc::now());
-                            stats.status = format!("Successfully processed URL: {}", url);
-                            let elapsed = stats
-                                .latest_update
-                                .unwrap()
-                                .signed_duration_since(Utc::now())
-                                .num_seconds()
-                                .abs() as f64;
-                            if elapsed > 0.0 {
-                                stats.requests_per_second =
-                                    stats.total_matches_processed as f64 / elapsed;
-                            }
-                            stats.total_matches_to_process = queue.lock().unwrap().len();
+                            stats.lock().unwrap().total_matches_processed += 1;
                         }
                         Err(e) => {
-                            error!("Worker {} failed to process {}: {}", i, url, e);
-                            let mut stats = stats.lock().unwrap();
-                            stats.status = format!("Error processing URL {}: {}", url, e);
-                            continue;
+                            error!("Failed to process {}: {}", url, e);
+                            stats.lock().unwrap().errors.push(format!("Failed to process {}: {}", url, e));
                         }
                     }
+                    progress.inc(1);
                 }
-                info!("Worker {} finished", i);
                 Ok(())
             });
             handles.push(handle);
         }
 
-        info!("Waiting for workers to complete");
         for handle in handles {
-            match handle.join() {
-                Ok(result) => {
-                    if let Err(e) = result {
-                        error!("Worker failed with error: {}", e);
-                    }
-                }
-                Err(e) => {
-                    error!("Worker panicked: {:?}", e);
-                }
-            }
+            handle.join().unwrap()?;
         }
-        info!("All workers completed");
 
-        // Update final status and save state
-        {
-            let mut stats = self.stats.lock().unwrap();
-            stats.status = format!(
-                "Completed processing {} URLs",
-                stats.total_matches_processed
+        progress.finish();
+        Ok(())
+    }
+
+    pub fn run(&mut self, _limit: Option<usize>) -> Result<()> {
+        fs::create_dir_all(HTML_FILES_DIR)?;
+        self.gather_urls()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracing::info;
+    use test_log::test;
+
+    #[test_log::test]
+    fn test_process_api_response_with_tooltip_urls() -> Result<()> {
+        let config = ScraperConfig::default();
+        let scraper = MatchHtmlScraper::new(config)?;
+        
+        // Create test JSON with the complex HTML string
+        let json = serde_json::json!({
+            "data": [[
+                "<a href=\"https://www.mkttl.co.uk/users/michaelh\">Michael Howard</a>",
+                "13/12/2025 23:19:48",
+                "Matches",
+                "Updated the score for <a href=\"https://www.mkttl.co.uk/matches/team/18/104/2025/12/13\">Milton Keynes Phoenix Leighton Buzzard Generations</a>, <a href=\"https://www.mkttl.co.uk/matches/team/1/49/2025/12/13\">Chackmore Hasbeens Open University Primes</a>, <a href=\"https://www.mkttl.co.uk/matches/team/80/48/2025/12/13\">Woburn Sands Wolves Newport Pagnell Vanquish</a> and <a href=\"javascript:void(0)\" class=\"tip\" title=\"<a class='tip' href='https://www.mkttl.co.uk/matches/team/27/25/2025/12/13'>Milton Keynes Topspin Milton Keynes Pumas</a><br /><a class='tip' href='https://www.mkttl.co.uk/matches/team/21/20/2025/12/13'>Milton Keynes Spinners Milton Keynes Sasaki</a><br /><a class='tip' href='https://www.mkttl.co.uk/matches/team/74/45/2025/12/13'>Greenleys Knights Mursley Magpies</a><br /><a class='tip' href='https://www.mkttl.co.uk/matches/team/4/68/2025/12/13'>Greenleys Monarchs Greenleys Glory</a><br /><a class='tip' href='https://www.mkttl.co.uk/matches/team/84/96/2025/12/13'>Woburn Sands Hit and Miss Newport Pagnell Vantage</a>\">5 other matches</a>."
+            ]]
+        });
+
+        // Expected URLs in the order they appear
+        let expected_urls = vec![
+            "https://www.mkttl.co.uk/matches/team/18/104/2025/12/13",
+            "https://www.mkttl.co.uk/matches/team/1/49/2025/12/13",
+            "https://www.mkttl.co.uk/matches/team/80/48/2025/12/13",
+            "https://www.mkttl.co.uk/matches/team/27/25/2025/12/13",
+            "https://www.mkttl.co.uk/matches/team/21/20/2025/12/13",
+            "https://www.mkttl.co.uk/matches/team/74/45/2025/12/13",
+            "https://www.mkttl.co.uk/matches/team/4/68/2025/12/13",
+            "https://www.mkttl.co.uk/matches/team/84/96/2025/12/13",
+        ];
+
+        // Process the response
+        let result = scraper.process_api_response(json)?;
+
+        // Convert result URLs to a vector for comparison
+        let result_urls: Vec<String> = result.into_iter().map(|(url, _)| url).collect();
+        info!("Found {} URLs: {:?}", result_urls.len(), result_urls);
+
+        // Check that we got all expected URLs
+        assert_eq!(result_urls.len(), expected_urls.len(), "Wrong number of URLs extracted");
+        
+        // Check each expected URL is present
+        for expected_url in expected_urls {
+            assert!(
+                result_urls.contains(&expected_url.to_string()),
+                "Missing URL: {}",
+                expected_url
             );
         }
-        self.state.last_run = Utc::now();
-        self.save_state()?;
 
         Ok(())
     }
