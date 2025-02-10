@@ -5,6 +5,7 @@ use serde::{Serialize, Deserialize};
 pub struct GameData {
     pub event_start_time: DateTime<Utc>,
     pub original_start_time: Option<DateTime<Utc>>,
+    pub tx_time: DateTime<Utc>,
     pub match_id: String,
     pub set_number: i32,
     pub leg_number: i32,
@@ -39,4 +40,13 @@ pub struct Players {
 pub enum MatchType {
     MkttlLeagueMatch,
     MkttlChallengeCup,
+}
+
+impl std::fmt::Display for MatchType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MatchType::MkttlLeagueMatch => write!(f, "League Match"),
+            MatchType::MkttlChallengeCup => write!(f, "Challenge Cup"),
+        }
+    }
 }

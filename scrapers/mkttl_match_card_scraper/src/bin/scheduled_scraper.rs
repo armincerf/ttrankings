@@ -224,6 +224,7 @@ async fn process_html_to_csv() -> Result<(i64, i64)> {
                     "handicap_home",
                     "handicap_away",
                     "report_html",
+                    "tx_time",
                 ])?;
 
                 for game in games {
@@ -249,6 +250,7 @@ async fn process_html_to_csv() -> Result<(i64, i64)> {
                         &game.handicap_home.to_string(),
                         &game.handicap_away.to_string(),
                         &game.report_html.unwrap_or_default(),
+                        &game.tx_time.to_rfc3339(),
                     ])?;
                 }
                 wtr.flush()?;

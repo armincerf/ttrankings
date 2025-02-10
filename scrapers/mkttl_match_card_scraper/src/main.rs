@@ -100,6 +100,7 @@ impl FileProcessor {
             "handicap_home",
             "handicap_away",
             "report_html",
+            "tx_time",
         ])?;
 
         // Write game data
@@ -126,6 +127,7 @@ impl FileProcessor {
                 &game.handicap_home.to_string(),
                 &game.handicap_away.to_string(),
                 &game.report_html.unwrap_or_default(),
+                &game.tx_time.to_rfc3339(),
             ])?;
         }
 

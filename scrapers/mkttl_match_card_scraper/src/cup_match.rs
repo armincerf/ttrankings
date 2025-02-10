@@ -22,6 +22,7 @@ impl CupMatchParser {
         let (event_start_time, original_start_time) = self.extract_start_time(&document)?;
         let ((home_team_name, home_team_club, home_handicap), (away_team_name, away_team_club, away_handicap)) = self.extract_teams(&document)?;
         let report_html = self.extract_report_html(&document);
+        let tx_time = Utc::now(); // Add tx_time as current time
 
         // Extract games data
         let games_selector = Selector::parse("#games-table tbody tr").unwrap();
@@ -53,6 +54,7 @@ impl CupMatchParser {
                 let game_data = GameData {
                     event_start_time,
                     original_start_time,
+                    tx_time,
                     match_id: match_id.to_string(),
                     set_number: set_number as i32,
                     leg_number: (leg_idx + 1) as i32,

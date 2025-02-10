@@ -84,6 +84,7 @@ fn process_match_data(game_scraper: &GameScraper, match_url: &str, html: &str, e
         expected_records.push(GameData {
             event_start_time,
             original_start_time: None,
+            tx_time: Utc::now(),
             match_id: record[match_id_idx].to_string(),
             set_number: record[set_number_idx].parse()?,
             leg_number: record[leg_number_idx].parse()?,

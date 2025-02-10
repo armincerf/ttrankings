@@ -1,4 +1,4 @@
-use chrono::DateTime;
+use chrono::{DateTime, ParseError};
 use clap::Parser;
 use csv::Reader;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -6,15 +6,75 @@ use questdb::{
     Result as QuestResult,
     ingress::{Buffer, Sender, TimestampNanos, TableName, ColumnName},
 };
+use reqwest;
+use serde_json::Value;
 use std::fs::{self, File};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use std::error::Error;
-use tokio::sync::Mutex;
-use tokio::task;
+use tokio::sync::{Mutex, Semaphore};
+use tokio::task::{self, JoinError};
 
-type BoxError = Box<dyn Error + Send + Sync>;
+// Define a custom error type for our import operations
+#[derive(Debug)]
+pub enum ImportError {
+    Io(std::io::Error),
+    Quest(questdb::Error),
+    Reqwest(reqwest::Error),
+    ChronoParse(ParseError),
+    Other(Box<dyn Error + Send + Sync>),
+}
+
+impl std::fmt::Display for ImportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ImportError::Io(e) => write!(f, "IO error: {}", e),
+            ImportError::Quest(e) => write!(f, "QuestDB error: {}", e),
+            ImportError::Reqwest(e) => write!(f, "Reqwest error: {}", e),
+            ImportError::ChronoParse(e) => write!(f, "DateTime parse error: {}", e),
+            ImportError::Other(e) => write!(f, "Other error: {}", e),
+        }
+    }
+}
+
+impl Error for ImportError {}
+
+impl From<std::io::Error> for ImportError {
+    fn from(err: std::io::Error) -> ImportError {
+        ImportError::Io(err)
+    }
+}
+
+impl From<questdb::Error> for ImportError {
+    fn from(err: questdb::Error) -> ImportError {
+        ImportError::Quest(err)
+    }
+}
+
+impl From<reqwest::Error> for ImportError {
+    fn from(err: reqwest::Error) -> ImportError {
+        ImportError::Reqwest(err)
+    }
+}
+
+impl From<ParseError> for ImportError {
+    fn from(err: ParseError) -> ImportError {
+        ImportError::ChronoParse(err)
+    }
+}
+
+impl From<Box<dyn Error + Send + Sync>> for ImportError {
+    fn from(err: Box<dyn Error + Send + Sync>) -> ImportError {
+        ImportError::Other(err)
+    }
+}
+
+impl From<JoinError> for ImportError {
+    fn from(err: JoinError) -> ImportError {
+        ImportError::Other(Box::new(err))
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -94,6 +154,7 @@ async fn process_csv_file(file_path: PathBuf, client: Arc<QuestDBClient>, progre
     let handicap_home = ColumnName::new("handicap_home")?;
     let handicap_away = ColumnName::new("handicap_away")?;
     let report_html = ColumnName::new("report_html")?;
+    let tx_time = ColumnName::new("tx_time")?;
 
     for result in rdr.records() {
         let record = match result {
@@ -112,6 +173,14 @@ async fn process_csv_file(file_path: PathBuf, client: Arc<QuestDBClient>, progre
             }
         };
 
+        let tx_timestamp = match record.get(21) {
+            Some(t) => t,
+            None => {
+                eprintln!("Missing tx_time in {:?}", file_path);
+                continue;
+            }
+        };
+
         let timestamp = match DateTime::parse_from_rfc3339(timestamp) {
             Ok(t) => t,
             Err(e) => {
@@ -119,8 +188,17 @@ async fn process_csv_file(file_path: PathBuf, client: Arc<QuestDBClient>, progre
                 continue;
             }
         };
+
+        let tx_timestamp = match DateTime::parse_from_rfc3339(tx_timestamp) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("Invalid tx_time in {:?}: {}", file_path, e);
+                continue;
+            }
+        };
         
         let ts_nanos = timestamp.timestamp_nanos_opt().unwrap_or(0);
+        let tx_nanos = tx_timestamp.timestamp_nanos_opt().unwrap_or(0);
 
         // Lock the buffer for modification
         let mut buffer = client.buffer.lock().await;
@@ -166,6 +244,7 @@ async fn process_csv_file(file_path: PathBuf, client: Arc<QuestDBClient>, progre
                 record.get(19).and_then(|v| v.parse().ok()).unwrap_or(0),
             )?
             .column_str(report_html, record.get(20).unwrap_or(""))?
+            .column_ts(tx_time, TimestampNanos::new(tx_nanos))?
             .at(TimestampNanos::new(ts_nanos))?;
 
         rows_processed += 1;
@@ -192,7 +271,7 @@ async fn process_csv_file(file_path: PathBuf, client: Arc<QuestDBClient>, progre
     Ok(rows_processed)
 }
 
-async fn run() -> Result<(), BoxError> {
+async fn run() -> Result<(), ImportError> {
     let args = Args::parse();
 
     // Initialize QuestDB connection
@@ -295,15 +374,55 @@ async fn run() -> Result<(), BoxError> {
     Ok(())
 }
 
-pub async fn import_csv_files(csv_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn get_latest_successful_import() -> Result<Option<DateTime<chrono::Utc>>, ImportError> {
+    let client = reqwest::Client::new();
+    let query = "select run_end_time from scraper_runs where step = 'import-to-questdb' and status = 'success' and new_files_count > 0 order by run_end_time desc limit 1;";
+    
+    let response = client
+        .get("http://localhost:9000/exec")
+        .query(&[("query", query)])
+        .send()
+        .await?;
+
+    let json: Value = response.json().await?;
+    
+    // Parse the response
+    if let Some(dataset) = json.get("dataset") {
+        if let Some(rows) = dataset.as_array() {
+            if let Some(first_row) = rows.first() {
+                if let Some(timestamp_str) = first_row[0].as_str() {
+                    return Ok(Some(DateTime::parse_from_rfc3339(timestamp_str)?.into()));
+                }
+            }
+        }
+    }
+    
+    Ok(None)
+}
+
+pub async fn import_csv_files(csv_dir: &str) -> Result<(), ImportError> {
     let mut csv_files = Vec::new();
     let entries = fs::read_dir(csv_dir)?;
+    
+    // Get the latest successful import timestamp
+    let latest_import = get_latest_successful_import().await?;
+    
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
         if path.extension().map_or(false, |ext| ext == "csv") {
-            // Only process files that contain "2025" in their name
-            if path.to_string_lossy().contains("2025") {
+            // Check if the file was modified after the latest successful import
+            let should_process = if let Some(latest_import) = latest_import {
+                let metadata = fs::metadata(&path)?;
+                let modified = metadata.modified()?;
+                let modified_datetime: DateTime<chrono::Utc> = modified.into();
+                modified_datetime > latest_import
+            } else {
+                // If no previous successful import, process all files
+                true
+            };
+            
+            if should_process {
                 csv_files.push(path);
             }
         }
@@ -326,14 +445,22 @@ pub async fn import_csv_files(csv_dir: &str) -> Result<(), Box<dyn std::error::E
 
         // Create a vector to collect errors
         let errors = Arc::new(Mutex::new(Vec::new()));
+        
+        // Create a semaphore to limit concurrent file operations
+        // Using 50 as a reasonable default, adjust if needed
+        let semaphore = Arc::new(Semaphore::new(50));
 
         let mut handles = Vec::new();
         for file in csv_files {
             let client = Arc::clone(&client);
             let errors = Arc::clone(&errors);
             let pb = pb.clone();
+            let semaphore = Arc::clone(&semaphore);
 
             let handle = tokio::spawn(async move {
+                // Acquire a permit from the semaphore before processing the file
+                let _permit = semaphore.acquire().await.unwrap();
+                
                 let file_path = file.clone();
                 // Create a hidden progress bar for the file
                 let file_progress = ProgressBar::hidden();
@@ -350,6 +477,7 @@ pub async fn import_csv_files(csv_dir: &str) -> Result<(), Box<dyn std::error::E
                         0
                     }
                 }
+                // The permit is automatically dropped here, releasing the semaphore slot
             });
             handles.push(handle);
         }
@@ -357,6 +485,7 @@ pub async fn import_csv_files(csv_dir: &str) -> Result<(), Box<dyn std::error::E
         let mut total_rows = 0;
         for handle in handles {
             total_rows += handle.await?;
+            pb.inc(1);
         }
 
         pb.finish_with_message(format!("Processed {} total rows", total_rows));
