@@ -3,7 +3,6 @@ use std::{
     path::Path,
     sync::{Arc, Mutex},
 };
-use mkttl_match_card_scraper::config::ScraperConfig;
 use tokio::{fs, task};
 use indicatif::{ProgressBar, ProgressStyle};
 use clap::Parser;
@@ -28,9 +27,9 @@ impl FileProcessor {
         Ok(Self)
     }
 
-    async fn process_file(&self, path: &Path, config: &ScraperConfig) -> Result<()> {
+    async fn process_file(&self, path: &Path) -> Result<()> {
         let html = fs::read_to_string(path).await?;
-        let scraper = mkttl_match_card_scraper::game_scraper::GameScraper::new(config);
+        let scraper = mkttl_match_card_scraper::game_scraper::GameScraper::new();
         let games = scraper.parse_html(&html, path.to_str().unwrap_or_default())?;
 
         // Skip if no games were found (e.g., future matches)
@@ -52,7 +51,7 @@ impl FileProcessor {
             "event_start_time",
             "match_id",
             "set_number",
-            "leg_number",
+            "game_number",
             "competition_type",
             "season",
             "division",
@@ -79,7 +78,7 @@ impl FileProcessor {
                 &game.event_start_time.to_rfc3339(),
                 &game.match_id,
                 &game.set_number.to_string(),
-                &game.leg_number.to_string(),
+                &game.game_number.to_string(),
                 &game.competition_type,
                 &game.season,
                 &game.division,
@@ -109,7 +108,6 @@ impl FileProcessor {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let config = ScraperConfig::from_env();
 
     // Get all HTML files
     let mut html_files = Vec::new();
@@ -148,10 +146,9 @@ async fn main() -> Result<()> {
     let mut tasks = Vec::new();
     for path in html_files {
         let pb = Arc::clone(&pb);
-        let config = config.clone();
         let processor = Arc::clone(&processor);
         let task = task::spawn(async move {
-            let result = processor.process_file(&path, &config).await;
+            let result = processor.process_file(&path).await;
             pb.lock().unwrap().inc(1);
             if let Err(e) = result {
                 eprintln!("Error processing {:?}: {}", path, e);

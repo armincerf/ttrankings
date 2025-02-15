@@ -8,7 +8,7 @@ pub struct GameData {
     pub tx_time: DateTime<Utc>,
     pub match_id: String,
     pub set_number: i32,
-    pub leg_number: i32,
+    pub game_number: i32,
     pub competition_type: String,
     pub season: String,
     pub division: String,

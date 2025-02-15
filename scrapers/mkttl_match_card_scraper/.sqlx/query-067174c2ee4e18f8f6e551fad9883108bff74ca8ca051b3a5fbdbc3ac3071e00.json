@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO season (league_id, name)\n        VALUES ($1, $2)\n        ON CONFLICT (league_id, name) DO UPDATE SET name = EXCLUDED.name\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "067174c2ee4e18f8f6e551fad9883108bff74ca8ca051b3a5fbdbc3ac3071e00"
+}

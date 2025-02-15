@@ -37,10 +37,10 @@ impl LeagueMatchParser {
             // Try to extract game data, skip if not played
             match self.extract_game_data(&game) {
                 Ok((players, scores)) => {
-                    // For each leg in the game
-                    let leg_scores = scores.split(", ").enumerate();
-                    for (leg_idx, leg_score) in leg_scores {
-                        match utils::parse_score(leg_score) {
+                    // For each game in the set
+                    let game_scores = scores.split(", ").enumerate();
+                    for (game_idx, game_score) in game_scores {
+                        match utils::parse_score(game_score) {
                             Ok((home_score, away_score)) => {
                                 let game_data = GameData {
                                     event_start_time,
@@ -48,7 +48,7 @@ impl LeagueMatchParser {
                                     tx_time,
                                     match_id: match_id.to_string(),
                                     set_number: set_number as i32,
-                                    leg_number: (leg_idx + 1) as i32,
+                                    game_number: (game_idx + 1) as i32,
                                     competition_type: competition_type.clone(),
                                     season: season.clone(),
                                     division: division.clone(),
@@ -70,7 +70,7 @@ impl LeagueMatchParser {
 
                                 games.push(game_data);
                             }
-                            Err(_) => continue, // Skip this leg if we can't parse the score
+                            Err(_) => continue, // Skip this game if we can't parse the score
                         }
                     }
                 }

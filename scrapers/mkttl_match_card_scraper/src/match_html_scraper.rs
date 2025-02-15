@@ -15,8 +15,10 @@ use std::{
     time::Duration,
 };
 use tracing::{error, info};
+use std::future::Future;
+use tokio::time::sleep;
+use tokio;
 
-use crate::config::ScraperConfig;
 use crate::types::GameData;
 use crate::utils::{detect_match_type, extract_teams_from_og_url};
 
@@ -51,29 +53,29 @@ impl Default for MatchHtmlStats {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RetryConfig {
-    max_retries: u32,
-    initial_delay: u64,
+    pub max_retries: u32,
+    pub initial_delay: u64,
 }
 
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
-            max_retries: MAX_RETRIES,
-            initial_delay: INITIAL_RETRY_DELAY,
+            max_retries: 3,
+            initial_delay: 1000,
         }
     }
 }
 
 pub struct MatchHtmlScraper {
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
     stats: Arc<Mutex<MatchHtmlStats>>,
 }
 
 impl MatchHtmlScraper {
-    pub fn new(_config: ScraperConfig) -> Result<Self> {
-        let client = reqwest::blocking::Client::new();
+    pub fn new() -> Result<Self> {
+        let client = reqwest::Client::new();
         let stats = Arc::new(Mutex::new(MatchHtmlStats::default()));
 
         Ok(Self { client, stats })
@@ -117,7 +119,7 @@ impl MatchHtmlScraper {
         Path::new(CACHE_DIR).join(format!("records_{}_to_{}.json", start_record, end_record))
     }
 
-    fn query_event_viewer(&self, start: u32, length: u32) -> Result<serde_json::Value> {
+    async fn query_event_viewer(&self, start: u32, length: u32) -> Result<serde_json::Value> {
         // Create cache directory if it doesn't exist
         fs::create_dir_all(CACHE_DIR)?;
 
@@ -175,7 +177,8 @@ impl MatchHtmlScraper {
                 "pages": "3",
                 "pagelength": length
             }))
-            .send()?;
+            .send()
+            .await?;
 
         if !response.status().is_success() {
             anyhow::bail!(
@@ -184,7 +187,7 @@ impl MatchHtmlScraper {
             );
         }
 
-        let text = response.text()?;
+        let text = response.text().await?;
 
         let json: serde_json::Value = serde_json::from_str(&text)?;
 
@@ -209,21 +212,21 @@ impl MatchHtmlScraper {
         Ok(json)
     }
 
-    fn retry_with_backoff<T, F>(&self, mut f: F, config: RetryConfig) -> Result<T>
+    async fn retry_with_backoff<T, F, Fut>(&self, mut f: F, config: RetryConfig) -> Result<T>
     where
-        F: FnMut() -> Result<T>,
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T>>,
     {
         let mut retries = 0;
         let mut delay = config.initial_delay;
-
         loop {
-            match f() {
+            match f().await {
                 Ok(value) => return Ok(value),
                 Err(e) => {
                     if retries >= config.max_retries {
                         return Err(e);
                     }
-                    thread::sleep(Duration::from_millis(delay));
+                    sleep(Duration::from_millis(delay)).await;
                     delay *= 2;
                     retries += 1;
                 }
@@ -284,7 +287,7 @@ impl MatchHtmlScraper {
             tx_time,
             match_id,
             set_number: 1, // Default values for now
-            leg_number: 1,
+            game_number: 1, // Changed from leg_number
             competition_type: match_type.to_string(),
             season: "2025".to_string(), // We know this from the URL filtering
             division: "Unknown".to_string(), // Would need to parse this from the page
@@ -305,13 +308,13 @@ impl MatchHtmlScraper {
         })
     }
 
-    fn gather_urls(&mut self) -> Result<()> {
+    async fn gather_urls(&mut self) -> Result<()> {
         let mut all_new_urls = HashSet::new();
         fs::create_dir_all(HTML_FILES_DIR)?;
         fs::create_dir_all(CACHE_DIR)?;
 
         // First query to get current total records
-        let initial_response = self.query_event_viewer(0, 1)?;
+        let initial_response = self.query_event_viewer(0, 1).await?;
         let current_total_records = initial_response
             .get("recordsTotal")
             .and_then(|v| v.as_u64())
@@ -396,7 +399,7 @@ impl MatchHtmlScraper {
             while start < range_end {
                 let length = PAGE_SIZE.min(range_end - start);
 
-                let response = self.query_event_viewer(start, length)?;
+                let response = self.query_event_viewer(start, length).await?;
                 let new_urls = self.process_api_response(response)?;
                 all_new_urls.extend(new_urls);
 
@@ -411,7 +414,7 @@ impl MatchHtmlScraper {
         if total_urls > 0 {
             info!("Processing {} URLs from new event logs", total_urls);
             let urls_vec: Vec<(String, DateTime<Utc>)> = all_new_urls.into_iter().collect();
-            fs::write(
+            tokio::fs::write(
                 URLS_FILE,
                 urls_vec
                     .iter()
@@ -419,8 +422,8 @@ impl MatchHtmlScraper {
                     .cloned()
                     .collect::<Vec<_>>()
                     .join("\n"),
-            )?;
-            self.process_urls(urls_vec)?;
+            ).await?;
+            self.process_urls(urls_vec).await?;
         } else {
             info!("No new URLs found in event logs");
         }
@@ -428,7 +431,7 @@ impl MatchHtmlScraper {
         Ok(())
     }
 
-    fn process_urls(&mut self, urls: Vec<(String, DateTime<Utc>)>) -> Result<()> {
+    async fn process_urls(&mut self, urls: Vec<(String, DateTime<Utc>)>) -> Result<()> {
         let queue: Arc<Mutex<VecDeque<(String, DateTime<Utc>)>>> =
             Arc::new(Mutex::new(VecDeque::from(urls)));
         let progress = ProgressBar::new(queue.lock().unwrap().len() as u64);
@@ -440,9 +443,10 @@ impl MatchHtmlScraper {
                 .unwrap(),
         );
 
-        let mut handles = Vec::new();
         let retry_config = RetryConfig::default();
+        let mut handles = Vec::new();
 
+        // Spawn async tasks (using tokio::spawn) instead of threads.
         for _ in 0..CONCURRENT_REQUESTS {
             let queue = Arc::clone(&queue);
             let client = self.client.clone();
@@ -450,35 +454,41 @@ impl MatchHtmlScraper {
             let progress = progress.clone();
             let retry_config = retry_config.clone();
 
-            let handle = thread::spawn(move || -> Result<()> {
-                let scraper = MatchHtmlScraper::new(ScraperConfig::default())?;
+            let handle = tokio::spawn(async move {
+                // It's okay to create a new scraper instance here.
+                let scraper = MatchHtmlScraper::new().unwrap();
                 while let Some((url, tx_time)) = {
-                    let mut queue = queue.lock().unwrap();
-                    queue.pop_front()
+                    let mut queue_lock = queue.lock().unwrap();
+                    queue_lock.pop_front()
                 } {
                     let filepath = Self::url_to_filepath(&url);
-                    let result = scraper.retry_with_backoff(
-                        || {
-                            let response = client.get(&url).send()?;
-                            let html = response.text()?;
-                            if Self::validate_html(&html) {
-                                fs::create_dir_all(HTML_FILES_DIR)?;
-                                // Extract and store game data
-                                let game_data = Self::extract_game_data(&html, &url, tx_time)?;
-                                // Store both HTML and metadata
-                                fs::write(&filepath, html)?;
-                                let metadata_path = filepath.with_extension("json");
-                                fs::write(
-                                    &metadata_path,
-                                    serde_json::to_string_pretty(&game_data)?,
-                                )?;
-                                Ok(())
-                            } else {
-                                Err(anyhow!("Invalid HTML content"))
-                            }
-                        },
-                        retry_config.clone(),
-                    );
+                    let result = scraper
+                        .retry_with_backoff(
+                            || async {
+                                // Async HTTP call
+                                let response = client.get(&url).send().await?;
+                                let html = response.text().await?;
+                                if Self::validate_html(&html) {
+                                    // Note: fs::create_dir_all and fs::write are blocking.
+                                    // In a production async app, consider using tokio::fs.
+                                    tokio::fs::create_dir_all(HTML_FILES_DIR).await?;
+                                    // Extract and store game data
+                                    let game_data = Self::extract_game_data(&html, &url, tx_time)?;
+                                    // Store both HTML and metadata
+                                    tokio::fs::write(&filepath, &html).await?;
+                                    let metadata_path = filepath.with_extension("json");
+                                    tokio::fs::write(
+                                        &metadata_path,
+                                        serde_json::to_string_pretty(&game_data)?,
+                                    ).await?;
+                                    Ok(())
+                                } else {
+                                    Err(anyhow!("Invalid HTML content"))
+                                }
+                            },
+                            retry_config.clone(),
+                        )
+                        .await;
 
                     match result {
                         Ok(_) => {
@@ -495,22 +505,23 @@ impl MatchHtmlScraper {
                     }
                     progress.inc(1);
                 }
-                Ok(())
+                Ok::<(), anyhow::Error>(())
             });
             handles.push(handle);
         }
 
+        // Await all the tasks
         for handle in handles {
-            handle.join().unwrap()?;
+            handle.await??;
         }
 
         progress.finish();
         Ok(())
     }
 
-    pub fn run(&mut self, _limit: Option<usize>) -> Result<()> {
-        fs::create_dir_all(HTML_FILES_DIR)?;
-        self.gather_urls()?;
+    pub async fn run(&mut self, _limit: Option<usize>) -> Result<()> {
+        tokio::fs::create_dir_all(HTML_FILES_DIR).await?;
+        self.gather_urls().await?;
         Ok(())
     }
 }
@@ -522,8 +533,7 @@ mod tests {
 
     #[test_log::test]
     fn test_process_api_response_with_tooltip_urls() -> Result<()> {
-        let config = ScraperConfig::default();
-        let scraper = MatchHtmlScraper::new(config)?;
+        let scraper = MatchHtmlScraper::new()?;
 
         // Create test JSON with the complex HTML string
         let json = serde_json::json!({

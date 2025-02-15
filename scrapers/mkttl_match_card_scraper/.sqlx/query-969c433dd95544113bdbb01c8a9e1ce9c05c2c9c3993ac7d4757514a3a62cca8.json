@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO venue (name, address)\n        VALUES ($1, $1)\n        ON CONFLICT (name, address) DO UPDATE SET name = EXCLUDED.name\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "969c433dd95544113bdbb01c8a9e1ce9c05c2c9c3993ac7d4757514a3a62cca8"
+}

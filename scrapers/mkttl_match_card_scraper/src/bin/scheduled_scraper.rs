@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use indicatif::{ProgressBar, ProgressStyle};
-use mkttl_match_card_scraper::{config::ScraperConfig, match_html_scraper::MatchHtmlScraper};
+use mkttl_match_card_scraper::match_html_scraper::MatchHtmlScraper;
 use questdb::ingress::{Buffer, ColumnName, Sender, TableName, TimestampNanos};
 use reqwest;
 use serde::Serialize;
@@ -9,6 +9,12 @@ use serde_json;
 use std::path::Path;
 use tokio::fs;
 use tracing_subscriber;
+use csv;
+use sqlx;
+use dotenv::dotenv;
+use sqlx::postgres::PgPoolOptions;
+use mkttl_match_card_scraper::match_score_updater::MatchScoreUpdater;
+use tracing::info;
 
 const SCRAPER_NAME: &str = "mkttl";
 const HTML_FILES_DIR: &str = "/Users/alexdavis/ghq/github.com/armincerf/ttrankings/scrapers/mkttl_match_card_scraper/html_files";
@@ -130,11 +136,11 @@ async fn scrape_html() -> Result<(i64, i64)> {
     let mut run = ScraperRun::new("scrape-html");
 
     let result: Result<(i64, i64)> = async {
-        let config = ScraperConfig::from_env();
-        let mut scraper = MatchHtmlScraper::new(config)?;
+        let mut scraper = MatchHtmlScraper::new()?;
         let initial_files = count_files_in_dir(HTML_FILES_DIR, "html").await?;
 
-        scraper.run(None)?;
+        info!("Running scraper for {}", SCRAPER_NAME);
+        scraper.run(None).await?;
 
         let final_files = count_files_in_dir(HTML_FILES_DIR, "html").await?;
 
@@ -160,7 +166,6 @@ async fn process_html_to_csv() -> Result<(i64, i64)> {
     let mut run = ScraperRun::new("html-to-csv");
 
     let result: Result<(i64, i64)> = async {
-        let config = ScraperConfig::from_env();
         fs::create_dir_all(CSV_OUTPUT_DIR).await?;
 
         // Get all HTML files from 2025
@@ -187,11 +192,32 @@ async fn process_html_to_csv() -> Result<(i64, i64)> {
                     .unwrap(),
             );
 
-            let processor = mkttl_match_card_scraper::game_scraper::GameScraper::new(&config);
+            let processor = mkttl_match_card_scraper::game_scraper::GameScraper::new();
 
             for path in html_files {
                 let html = fs::read_to_string(&path).await?;
-                let games = processor.parse_html(&html, path.to_str().unwrap_or_default())?;
+                let games = match processor.parse_html(&html, path.to_str().unwrap_or_default()) {
+                    Ok(games) => games,
+                    Err(e) => {
+                        let error_msg = format!("Error processing HTML file {:?}: {}", path, e);
+                        run.error_message = Some(error_msg.clone());
+                        run.log_to_questdb().await?;
+                        
+                        // Send notification
+                        let notification_cmd = format!(
+                            "osascript -e 'display notification \"{}\" with title \"MKTTL Scraper Error\"'",
+                            error_msg.replace("\"", "\\\"")
+                        );
+                        if let Err(notify_err) = std::process::Command::new("sh")
+                            .arg("-c")
+                            .arg(&notification_cmd)
+                            .output()
+                        {
+                            eprintln!("Failed to send notification: {}", notify_err);
+                        }
+                        continue;
+                    }
+                };
 
                 let csv_path = Path::new(CSV_OUTPUT_DIR)
                     .join(path.strip_prefix(HTML_FILES_DIR).unwrap_or(&path))
@@ -206,7 +232,7 @@ async fn process_html_to_csv() -> Result<(i64, i64)> {
                     "event_start_time",
                     "match_id",
                     "set_number",
-                    "leg_number",
+                    "game_number",
                     "competition_type",
                     "season",
                     "division",
@@ -232,7 +258,7 @@ async fn process_html_to_csv() -> Result<(i64, i64)> {
                         &game.event_start_time.to_rfc3339(),
                         &game.match_id,
                         &game.set_number.to_string(),
-                        &game.leg_number.to_string(),
+                        &game.game_number.to_string(),
                         &game.competition_type,
                         &game.season,
                         &game.division,
@@ -272,6 +298,66 @@ async fn process_html_to_csv() -> Result<(i64, i64)> {
             Ok((new_files, total_files))
         }
         Err(e) => {
+            let error_msg = e.to_string();
+            run.fail(&error_msg);
+            run.log_to_questdb().await?;
+            
+            // Send notification for any error
+            let notification_cmd = format!(
+                "osascript -e 'display notification \"{}\" with title \"MKTTL Scraper Error\"'",
+                error_msg.replace("\"", "\\\"")
+            );
+            if let Err(notify_err) = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&notification_cmd)
+                .output()
+            {
+                eprintln!("Failed to send notification: {}", notify_err);
+            }
+            Err(e)
+        }
+    }
+}
+
+async fn get_postgres_record_count(database_url: &str) -> Result<i64> {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .connect(database_url)
+        .await?;
+
+    let record = sqlx::query!("SELECT COUNT(*) as count FROM matches")
+        .fetch_one(&pool)
+        .await?;
+
+    Ok(record.count.unwrap_or(0))
+}
+
+async fn import_to_postgres() -> Result<(i64, i64)> {
+    let mut run = ScraperRun::new("import-to-postgres");
+
+    let result: Result<(i64, i64)> = async {
+        let database_url = std::env::var("DATABASE_URL")
+            .map_err(|e| anyhow::anyhow!("DATABASE_URL not set: {}", e))?;
+
+        let initial_count = get_postgres_record_count(&database_url).await?;
+        
+        // Use the existing import functionality
+        mkttl_match_card_scraper::import_to_postgres::import_csv_files(CSV_OUTPUT_DIR, &database_url)
+            .await
+            .map_err(|e| anyhow::anyhow!("Import failed: {}", e))?;
+
+        let final_count = get_postgres_record_count(&database_url).await?;
+        Ok((final_count - initial_count, final_count))
+    }
+    .await;
+
+    match result {
+        Ok((new_records, total_records)) => {
+            run.complete(new_records, total_records);
+            run.log_to_questdb().await?;
+            Ok((new_records, total_records))
+        }
+        Err(e) => {
             run.fail(&e.to_string());
             run.log_to_questdb().await?;
             Err(e)
@@ -284,8 +370,8 @@ async fn import_to_questdb() -> Result<(i64, i64)> {
 
     let result: Result<(i64, i64)> = async {
         let initial_count = get_record_count().await?;
-
-        // Use the existing import functionality
+        
+        // Use the existing import functionality with the data
         mkttl_match_card_scraper::import_to_questdb::import_csv_files(CSV_OUTPUT_DIR)
             .await
             .map_err(|e| anyhow::anyhow!("Import failed: {}", e))?;
@@ -309,8 +395,61 @@ async fn import_to_questdb() -> Result<(i64, i64)> {
     }
 }
 
+async fn update_match_scores() -> Result<(i64, i64)> {
+    let mut run = ScraperRun::new("update-match-scores");
+
+    let result: Result<(i64, i64)> = async {
+        let database_url = std::env::var("DATABASE_URL")
+            .map_err(|e| anyhow::anyhow!("DATABASE_URL not set: {}", e))?;
+
+        let initial_count = sqlx::query!(
+            "SELECT COUNT(*) as count FROM matches WHERE home_score IS NOT NULL AND away_score IS NOT NULL"
+        )
+        .fetch_one(&PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&database_url)
+            .await?)
+        .await?
+        .count
+        .unwrap_or(0);
+
+        // Run the match score updater
+        MatchScoreUpdater::run_standalone(&database_url, HTML_FILES_DIR).await?;
+
+        let final_count = sqlx::query!(
+            "SELECT COUNT(*) as count FROM matches WHERE home_score IS NOT NULL AND away_score IS NOT NULL"
+        )
+        .fetch_one(&PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&database_url)
+            .await?)
+        .await?
+        .count
+        .unwrap_or(0);
+
+        Ok((final_count - initial_count, final_count))
+    }
+    .await;
+
+    match result {
+        Ok((new_records, total_records)) => {
+            run.complete(new_records, total_records);
+            run.log_to_questdb().await?;
+            Ok((new_records, total_records))
+        }
+        Err(e) => {
+            run.fail(&e.to_string());
+            run.log_to_questdb().await?;
+            Err(e)
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load .env file
+    dotenv().ok();
+    
     // Initialize tracing subscriber
     tracing_subscriber::fmt::init();
 
@@ -329,12 +468,56 @@ async fn main() -> Result<()> {
             new_csv, total_csv
         );
 
-        println!("\nStarting QuestDB import...");
-        let (new_records, total_records) = import_to_questdb().await?;
-        println!(
-            "Import complete: {} new records, {} total",
-            new_records, total_records
-        );
+        println!("\nStarting database imports...");
+        
+        let quest_result = import_to_questdb().await;
+        match &quest_result {
+            Ok((new_records, total_records)) => {
+                println!(
+                    "QuestDB import complete: {} new records, {} total",
+                    new_records, total_records
+                );
+            }
+            Err(e) => {
+                println!("QuestDB import failed: {}", e);
+            }
+        }
+
+        let postgres_result = import_to_postgres().await;
+        match &postgres_result {
+            Ok((new_records, total_records)) => {
+                println!(
+                    "PostgreSQL import complete: {} new records, {} total",
+                    new_records, total_records
+                );
+            }
+            Err(e) => {
+                println!("PostgreSQL import failed: {}", e);
+            }
+        }
+
+        println!("\nStarting match score updates...");
+        let score_update_result = update_match_scores().await;
+        match &score_update_result {
+            Ok((new_scores, total_scores)) => {
+                println!(
+                    "Match score updates complete: {} new/updated scores, {} total matches with scores",
+                    new_scores, total_scores
+                );
+            }
+            Err(e) => {
+                println!("Match score updates failed: {}", e);
+            }
+        }
+
+        if quest_result.is_err() || postgres_result.is_err() || score_update_result.is_err() {
+            return Err(anyhow::anyhow!(
+                "Database operations failed. QuestDB: {:?}, PostgreSQL: {:?}, Score Updates: {:?}",
+                quest_result.err().unwrap_or_else(|| anyhow::anyhow!("Unknown error")),
+                postgres_result.err().unwrap_or_else(|| anyhow::anyhow!("Unknown error")),
+                score_update_result.err().unwrap_or_else(|| anyhow::anyhow!("Unknown error"))
+            ));
+        }
 
         Ok::<(), anyhow::Error>(())
     }

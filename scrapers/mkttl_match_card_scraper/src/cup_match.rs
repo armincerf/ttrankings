@@ -43,12 +43,12 @@ impl CupMatchParser {
                 continue;
             }
 
-            // For each leg in the game
-            let leg_scores = scores.split(", ").enumerate();
-            for (leg_idx, leg_score) in leg_scores {
-                let (home_score, away_score) = match utils::parse_score(leg_score) {
+            // For each game in the set
+            let game_scores = scores.split(", ").enumerate();
+            for (game_idx, game_score) in game_scores {
+                let (home_score, away_score) = match utils::parse_score(game_score) {
                     Ok(score) => score,
-                    Err(_) => continue, // Skip this leg if score parsing fails
+                    Err(_) => continue, // Skip this game if score parsing fails
                 };
 
                 let game_data = GameData {
@@ -57,7 +57,7 @@ impl CupMatchParser {
                     tx_time,
                     match_id: match_id.to_string(),
                     set_number: set_number as i32,
-                    leg_number: (leg_idx + 1) as i32,
+                    game_number: (game_idx + 1) as i32,
                     competition_type: competition_type.clone(),
                     season: season.clone(),
                     division: division.clone(),

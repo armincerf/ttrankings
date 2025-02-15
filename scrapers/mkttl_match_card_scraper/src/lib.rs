@@ -1,9 +1,10 @@
-pub mod analysis;
-pub mod config;
 pub mod game_scraper;
 pub mod types;
 pub mod utils;
 pub mod league_match;
 pub mod cup_match;
 pub mod match_html_scraper;
-pub mod import_to_questdb; 
+pub mod parse_csv;
+pub mod import_to_questdb;
+pub mod import_to_postgres;
+pub mod match_score_updater; 

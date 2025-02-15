@@ -1,10 +1,7 @@
-mod config;
-mod game_scraper;
-mod types;
-mod utils;
-mod league_match;
-mod cup_match;
-mod match_html_scraper;
+use mkttl_match_card_scraper::{
+    game_scraper::GameScraper,
+    match_html_scraper::MatchHtmlScraper,
+};
 
 use anyhow::Result;
 use std::{
@@ -14,10 +11,6 @@ use std::{
 use tracing::info;
 use clap::{Parser, Subcommand};
 use csv;
-
-use config::ScraperConfig;
-use game_scraper::GameScraper;
-use match_html_scraper::MatchHtmlScraper;
 
 const OUTPUT_DIR: &str = "parsed_html_output";
 
@@ -52,12 +45,12 @@ impl FileProcessor {
         Ok(Self)
     }
 
-    async fn process_file(&self, path: &Path, config: &ScraperConfig) -> Result<()> {
+    async fn process_file(&self, path: &Path) -> Result<()> {
         let html = fs::read_to_string(path)?;
         info!("Processing cup_match match: {:?}", path);
 
         // Process the match using the appropriate scraper
-        let scraper = GameScraper::new(config);
+        let scraper = GameScraper::new();
         let games = scraper.parse_html(&html, path.to_str().unwrap_or_default())?;
 
         // Skip if no games data (unplayed match)
@@ -82,7 +75,7 @@ impl FileProcessor {
             "event_start_time",
             "match_id",
             "set_number",
-            "leg_number",
+            "game_number",
             "competition_type",
             "season",
             "division",
@@ -109,7 +102,7 @@ impl FileProcessor {
                 &game.event_start_time.to_rfc3339(),
                 &game.match_id,
                 &game.set_number.to_string(),
-                &game.leg_number.to_string(),
+                &game.game_number.to_string(),
                 &game.competition_type,
                 &game.season,
                 &game.division,
@@ -136,25 +129,21 @@ impl FileProcessor {
     }
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     // Initialize logging
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
-    let config = ScraperConfig::from_env();
 
     match cli.command {
         Commands::ProcessFile { file } => {
             let processor = FileProcessor::new()?;
-            // Create a new tokio runtime just for this async operation
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(async {
-                processor.process_file(Path::new(&file), &config).await
-            })?;
+            processor.process_file(Path::new(&file)).await?;
         }
         Commands::ScrapeHtml { limit } => {
-            let mut scraper = MatchHtmlScraper::new(config)?;
-            scraper.run(limit)?;
+            let mut scraper = MatchHtmlScraper::new()?;
+            scraper.run(limit).await?;
         }
     }
 

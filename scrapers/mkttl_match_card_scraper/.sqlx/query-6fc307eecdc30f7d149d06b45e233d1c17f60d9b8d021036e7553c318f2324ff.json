@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO player_league (player_id, league_id)\n                VALUES ($1, $2), ($3, $2)\n                ON CONFLICT DO NOTHING\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6fc307eecdc30f7d149d06b45e233d1c17f60d9b8d021036e7553c318f2324ff"
+}

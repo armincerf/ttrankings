@@ -1,0 +1,12 @@
+Starting new parse run at 2025-02-15 19:21:04.149759 UTC
+Processing match /Users/alexdavis/ghq/github.com/armincerf/ttrankings/scrapers/mkttl_match_card_scraper/html_files/44_99_2025_1_6.html set 4 with 2 games
+Processing match /Users/alexdavis/ghq/github.com/armincerf/ttrankings/scrapers/mkttl_match_card_scraper/html_files/44_99_2025_1_6.html set 5 with 2 games
+Processing match /Users/alexdavis/ghq/github.com/armincerf/ttrankings/scrapers/mkttl_match_card_scraper/html_files/44_99_2025_1_6.html set 7 with 2 games
+Processing match /Users/alexdavis/ghq/github.com/armincerf/ttrankings/scrapers/mkttl_match_card_scraper/html_files/44_99_2025_1_6.html set 3 with 2 games
+Processing match /Users/alexdavis/ghq/github.com/armincerf/ttrankings/scrapers/mkttl_match_card_scraper/html_files/44_99_2025_1_6.html set 2 with 2 games
+Processing match /Users/alexdavis/ghq/github.com/armincerf/ttrankings/scrapers/mkttl_match_card_scraper/html_files/44_99_2025_1_6.html set 9 with 2 games
+Processing match /Users/alexdavis/ghq/github.com/armincerf/ttrankings/scrapers/mkttl_match_card_scraper/html_files/44_99_2025_1_6.html set 1 with 2 games
+Processing match /Users/alexdavis/ghq/github.com/armincerf/ttrankings/scrapers/mkttl_match_card_scraper/html_files/44_99_2025_1_6.html set 6 with 2 games
+Processing match /Users/alexdavis/ghq/github.com/armincerf/ttrankings/scrapers/mkttl_match_card_scraper/html_files/44_99_2025_1_6.html set 10 with 2 games
+Processing match /Users/alexdavis/ghq/github.com/armincerf/ttrankings/scrapers/mkttl_match_card_scraper/html_files/44_99_2025_1_6.html set 8 with 2 games
+Successfully parsed 20 games from "/Users/alexdavis/ghq/github.com/armincerf/ttrankings/scrapers/mkttl_match_card_scraper/parsed_html_output/44_99_2025_1_6.csv"

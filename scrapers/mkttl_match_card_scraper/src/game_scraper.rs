@@ -3,7 +3,6 @@ use scraper::Html;
 use scraper::Selector;
 
 use crate::{
-    config::ScraperConfig,
     league_match::LeagueMatchParser,
     cup_match::CupMatchParser,
     types::{GameData, MatchType},
@@ -15,7 +14,6 @@ use crate::{
 /// This struct handles the parsing of both league matches and challenge cup matches,
 /// delegating the actual parsing to specialized parsers based on the match type.
 pub struct GameScraper {
-    config: ScraperConfig,
 }
 
 impl GameScraper {
@@ -28,10 +26,8 @@ impl GameScraper {
     /// # Returns
     ///
     /// Returns a Result containing the new GameScraper instance
-    pub fn new(config: &ScraperConfig) -> Self {
-        Self {
-            config: config.clone(),
-        }
+    pub fn new() -> Self {
+        Self {}
     }
 
     /// Returns true if the match has been played, false if it's a future match
@@ -110,15 +106,11 @@ impl GameScraper {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ScraperConfig;
 
     #[test]
     fn test_game_scraper_new() {
-        let config = ScraperConfig::default();
-        let scraper = GameScraper::new(&config);
-        assert!(matches!(scraper, GameScraper { config: _ }));
-        //check config is the same
-        assert_eq!(scraper.config, config);
+        let scraper = GameScraper::new();
+        assert!(matches!(scraper, GameScraper {}));
     }
 
     // TODO: Add tests for parse_html with:
